@@ -1,0 +1,6 @@
+.dl/
+build/
+dist/
+editor/.godot/
+*.import
+__pycache__/
