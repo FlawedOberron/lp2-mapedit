@@ -18,7 +18,7 @@ var _vs_thumbs := {}       # library key -> texture
 var _shown: Array = []     # the vs_types rows in vs_list
 var hint: Label
 var all_layouts: CheckBox  # also put a copy in the other layouts' matching sets
-var vs_types: Array = []   # [type id, text, short label]
+var vs_types: Array = []   # per family: [type id placed, tooltip, short label, family's types]
 var _node: Node3D = null   # the marker being placed
 var _press := Vector2.ZERO
 var _origin := Vector3.ZERO
@@ -85,25 +85,25 @@ func setup(m: Node) -> void:
 	_fill_items()
 
 func _load_vs_types() -> void:
-	# notes/vs-ids.md's table: | id | LP1 model | LP1 size | bones | placements | LP2 model | LP2 size | ...
+	# one entry per VS family (the tools' vs_families.json, lp2vsfamilies.py): [type placed (the family's default),
+	# tooltip, label, every type of the family]; the variant and arm weapons are set in the inspector (vsprops.gd)
 	vs_types = []
-	var f := FileAccess.open(main.tools.path_join("notes/vs-ids.md"), FileAccess.READ)
+	var f := FileAccess.open(main.tools.path_join("vs_families.json"), FileAccess.READ)
 	if f == null:
 		return
-	for line in f.get_as_text().split("\n"):
-		var c := line.split("|")
-		if c.size() < 10 or not c[1].strip_edges().begins_with("0x"):
-			continue
-		var tag := c[1].strip_edges().split(" ")   # "0x78 ✈": a flyer
-		var id := tag[0].hex_to_int()
-		var model := c[6].strip_edges() if c[6].strip_edges() != "" else c[2].strip_edges()
-		if model == "":
-			continue
-		var sz := c[7].strip_edges() if c[7].strip_edges() != "" else c[3].strip_edges()
-		var maps := c[9].strip_edges()
-		vs_types.append([id, "0x%02x%s  %s%s%s" % [id, "  flying" if tag.size() > 1 else "", model.replace("*", ""), ("  " + sz.replace(", ", " x ") + " m") if sz != "" else "",
-			("  (stock maps " + maps + ")") if maps != "" else ""],
-			"0x%02x%s\n%s" % [id, " (flying)" if tag.size() > 1 else "", model.replace("*", "")]])
+	var j = JSON.parse_string(f.get_as_text())
+	if typeof(j) != TYPE_DICTIONARY:
+		return
+	for fam in j.get("families", []):
+		var t := int(fam["default"])
+		var info: Dictionary = j["types"].get("%02x" % t, {})
+		var sz: Array = info.get("size", [])
+		var arms: Array = info.get("editable", [])
+		var tip := "%s: %d variant(s), %s%s" % [fam["name"], fam["types"].size(),
+			("weapon mounts " + ", ".join(arms)) if not arms.is_empty() else "no weapon mounts",
+			("  %s x %s x %s m" % sz) if sz.size() == 3 else ""]
+		vs_types.append([t, tip, "%s\n%d variant%s" % [fam["name"], fam["types"].size(), "" if fam["types"].size() == 1 else "s"],
+			fam["types"].map(func(x): return int(x))])
 
 func _fill_items() -> void:
 	item_pick.clear()
@@ -125,10 +125,9 @@ func _fill_items() -> void:
 
 func _fill_vs() -> void:
 	vs_list.clear()
-	var have := vs_types.filter(func(t): return main.library.by_key.has("vs_%02x" % t[0]))
-	_shown = have if not have.is_empty() else vs_types   # no library yet (Browser: Get assets): every type, no pictures
+	_shown = vs_types   # no library yet (Browser: Get assets): no pictures
 	for t in _shown:
-		var key := "vs_%02x" % t[0]
+		var key := _thumb_key(t)
 		var i := vs_list.add_item(t[2])
 		vs_list.set_item_tooltip(i, t[1])
 		if _vs_thumbs.has(key):
@@ -140,6 +139,13 @@ func _fill_vs() -> void:
 					vs_list.set_item_icon(i, tex))
 	if vs_list.item_count:
 		vs_list.select(0)
+
+func _thumb_key(t: Array) -> String:
+	# the family's default type's library model, else any of its types'
+	for x in [t[0]] + t[3]:
+		if main.library.by_key.has("vs_%02x" % x):
+			return "vs_%02x" % x
+	return "vs_%02x" % t[0]
 
 func placing() -> bool:
 	return visible or _node != null

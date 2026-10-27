@@ -142,6 +142,7 @@ var physics_on: CheckBox
 var pickup_row: Control   # explicit weapon pickup
 var pickup_pick: OptionButton
 var tier_row: Control     # VS tier
+var vs_props: VBoxContainer   # VS variant + arm weapons (vsprops.gd)
 var tier_pick: OptionButton
 var dig_row: Control   # buried pickups / VS ("dig here" pile)
 var dig_on: CheckBox
@@ -465,6 +466,10 @@ func _build_ui() -> void:
 	trow.add_child(tier_pick)
 	tier_row = trow
 	right.add_child(trow)
+	vs_props = VBoxContainer.new()
+	vs_props.set_script(load("res://vsprops.gd"))
+	right.add_child(vs_props)
+	vs_props.setup(self)
 	var dbox := VBoxContainer.new()
 	var drow := HBoxContainer.new()
 	dig_on = CheckBox.new()
@@ -1740,6 +1745,7 @@ func _show_inspector() -> void:
 		var it := int(pickups[0].get_meta("data").get("item", -1))
 		pickup_pick.selected = maxi(0, PICKUP_ITEMS.find_custom(func(e): return e[0] == it))
 	var vss := _diggable().filter(func(n): return _category(n) == 2)
+	vs_props.refresh(vss)
 	tier_row.visible = not vss.is_empty()
 	if not vss.is_empty():
 		var t := int(vss[0].get_meta("data").get("tier", -1))
@@ -1821,16 +1827,21 @@ func _on_pickup(i: int) -> void:
 			d.erase("item")
 		else:
 			d["item"] = id
-		var ref: Variant = n.get_meta("item") if n.has_meta("item") else null
-		if ref != null and is_instance_valid(ref):
-			(ref as TreeItem).set_text(0, _marker_label(d, true))
-		var old: Node = n.get_node_or_null("model")
-		if old:
-			n.remove_child(old)
-			old.queue_free()
-		(n.get_child(0) as MeshInstance3D).visible = true
-		n.remove_meta("asset")
-		_marker_model(n)
+		refresh_marker(n)
+
+func refresh_marker(n: Node3D) -> void:
+	# after its data's item / model changed: outliner label and the shown model
+	var d: Dictionary = n.get_meta("data")
+	var ref: Variant = n.get_meta("item") if n.has_meta("item") else null
+	if ref != null and is_instance_valid(ref):
+		(ref as TreeItem).set_text(0, _marker_label(d, true))
+	var old: Node = n.get_node_or_null("model")
+	if old:
+		n.remove_child(old)
+		old.queue_free()
+	(n.get_child(0) as MeshInstance3D).visible = true
+	n.remove_meta("asset")
+	_marker_model(n)
 
 func _on_tier(i: int) -> void:
 	if updating_ui:
