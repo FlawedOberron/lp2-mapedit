@@ -2,19 +2,21 @@ extends Window
 # Settings window: the game folders (Lost Planet 2; Lost Planet 1 for importing its maps and its pieces in the
 # Browser) and the asset library folder. Opens by itself on the first run, or when the LP2 folder isn't found.
 # Steam installs are found by themselves (steamapps/libraryfolders.vdf).
+# Also the update check switch (updates.gd) and a check on demand.
 
 var main: Node
 var game_edit: LineEdit
 var lp1_edit: LineEdit
 var library_edit: LineEdit
 var note: Label
+var update_check: CheckBox
 var browse: FileDialog
 var browse_target: LineEdit
 
 func _init() -> void:
 	title = "Settings"
-	size = Vector2i(640, 300)
-	min_size = Vector2i(480, 260)
+	size = Vector2i(640, 340)
+	min_size = Vector2i(480, 300)
 	transient = true
 	visible = false
 	wrap_controls = true
@@ -32,6 +34,13 @@ func setup(m: Node) -> void:
 	game_edit = _row(v, "Lost Planet 2 folder (with LP2DX9.exe)")
 	lp1_edit = _row(v, "Lost Planet 1 folder (optional: importing its maps; with nativePC)")
 	library_edit = _row(v, "Asset library folder (game models for the editor, built from your installs)")
+	var u := HBoxContainer.new()
+	v.add_child(u)
+	update_check = CheckBox.new()
+	update_check.text = "Check for updates on start"
+	update_check.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	u.add_child(update_check)
+	main._button(u, "Check now", func(): main.updates.check_now())
 	note = Label.new()
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD
 	note.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -67,7 +76,9 @@ func open(first_run: bool) -> void:
 	game_edit.text = main.game
 	lp1_edit.text = main.lp1_dir
 	library_edit.text = main.library_dir
-	note.text = ("Welcome! Point the editor at your Lost Planet 2 install. The first time, it then copies the game "
+	update_check.button_pressed = main.updates.enabled()
+	title = "Settings  (LP2 Map Editor %s)" % (main.updates.version if main.updates.version != "" else "dev")
+	note.text =("Welcome! Point the editor at your Lost Planet 2 install. The first time, it then copies the game "
 		+ "models it needs into the asset library (a few minutes); nothing from the game is changed until you "
 		+ "Install a map.") if first_run else ""
 	popup_centered()
@@ -82,4 +93,5 @@ func _on_save() -> void:
 		note.text = "No nativePC folder in %s: pick the Lost Planet 1 folder, or leave it empty" % lp1
 		return
 	hide()
+	main.cfg.set_value("updates", "check", update_check.button_pressed)
 	main.set_paths(g, lp1, library_edit.text.strip_edges())

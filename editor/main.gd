@@ -163,6 +163,7 @@ var perf_bar: ProgressBar
 var perf_panel: PanelContainer
 var perf_grid: GridContainer
 var updating_ui := false
+var updates: Node
 
 func _ready() -> void:
 	cfg.load(SETTINGS)
@@ -302,8 +303,7 @@ func _build_ui() -> void:
 	# two rows: the project, the windows and the job status; then the layout, the edit tools and the preview
 	var bars := VBoxContainer.new()
 	root.add_child(_panel(bars))
-	var bar := HBoxContainer.new()
-	bars.add_child(bar)
+	var bar := _scroll_row(bars)
 	_button(bar, "New...", func(): new_win.open()).tooltip_text = "A new map project from one of Lost Planet 1's maps"
 	_button(bar, "Open...", _on_open)
 	_button(bar, "Save", save_project)
@@ -322,6 +322,7 @@ func _build_ui() -> void:
 	status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	status.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
 	status.clip_text = true
+	status.custom_minimum_size.x = 160
 	bar.add_child(status)
 	job_bar = ProgressBar.new()
 	job_bar.custom_minimum_size = Vector2(220, 0)
@@ -329,8 +330,7 @@ func _build_ui() -> void:
 	job_bar.step = 0.001
 	job_bar.visible = false
 	bar.add_child(job_bar)
-	bar = HBoxContainer.new()
-	bars.add_child(bar)
+	bar = _scroll_row(bars)
 	bar.add_child(_label("Layout"))
 	for v in 4:
 		var b := Button.new()
@@ -618,6 +618,11 @@ func _build_ui() -> void:
 	settings_win.set_script(load("res://settings.gd"))
 	add_child(settings_win)
 	settings_win.setup(self)
+	updates = Node.new()
+	updates.set_script(load("res://updates.gd"))
+	add_child(updates)
+	updates.setup(self)
+	updates.call_deferred("check_on_start")
 	new_win = Window.new()
 	new_win.set_script(load("res://newmap.gd"))
 	add_child(new_win)
@@ -658,6 +663,16 @@ func _vec_row(parent: Control, title: String, lo: float, hi: float, step: float,
 	if tag != null:
 		insp_rows.append(box)
 	return out
+
+# a toolbar row that scrolls sideways when the window is too narrow for it
+func _scroll_row(parent: Control) -> HBoxContainer:
+	var sc := ScrollContainer.new()
+	sc.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	parent.add_child(sc)
+	var row := HBoxContainer.new()
+	row.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	sc.add_child(row)
+	return row
 
 func _panel(c: Control) -> PanelContainer:
 	var p := PanelContainer.new()

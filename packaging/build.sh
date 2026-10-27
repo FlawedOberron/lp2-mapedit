@@ -36,6 +36,7 @@ rm -rf "$WORK/win/python/Lib/test" "$WORK/win/python/Lib/idlelib" "$WORK/win/pyt
 tools "$WORK/win"
 cp "$REPO/README.md" "$WORK/win/README.md"
 cp "$REPO/LICENSE" "$WORK/win/LICENSE.txt"
+echo "$VERSION" > "$WORK/win/version.txt"   # the editor's update check compares it with the newest release
 (cd "$WORK/win" && rm -f "$DIST/lp2-mapedit-$VERSION-windows-x64.zip" && zip -qr9 "$DIST/lp2-mapedit-$VERSION-windows-x64.zip" .)
 
 # ---- Linux AppImage
@@ -45,6 +46,7 @@ tar -xzf "$DL"/cpython-3.12.*-x86_64-unknown-linux-gnu-install_only.tar.gz -C "$
 rm -rf "$A/python/lib/python3.12/test" "$A/python/lib/python3.12/idlelib" "$A/python/lib/python3.12/tkinter" \
 	"$A/python/include" "$A"/python/lib/libtcl* "$A"/python/lib/libtk* "$A"/python/lib/tcl* "$A"/python/lib/tk*
 tools "$A"
+echo "$VERSION" > "$A/version.txt"
 "$A/python/bin/python3" -m compileall -q "$A/tools"   # the AppImage is read-only: no .pyc written at run time
 cp "$REPO/editor/icon.png" "$A/lp2-mapedit.png"
 cat > "$A/lp2-mapedit.desktop" <<EOF
