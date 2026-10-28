@@ -213,11 +213,18 @@ def lp1_maps(a, lib):
 def get(a):
     lib = os.path.abspath(a.lib)
     raw = os.path.join(lib, "raw", "lp2")
-    if a.force or not os.path.exists(os.path.join(raw, "manifest.json")):
+    have = os.path.join(raw, "manifest.json")
+    none = os.path.join(raw, "no_model.json")   # keys the game has no model for: not ripped again
+    skip = set(json.load(open(none))) if os.path.exists(none) and not a.force else set()
+    missing = [] if a.force or not os.path.exists(have) else \
+        sorted(set(lp2_names()) - set(json.load(open(have))) - skip)
+    if a.force or not os.path.exists(have) or missing:
+        # a library from an older version: rip only the models it lacks (build_marker_assets.py KEY ...)
         progress(0.0, "Ripping LP2 models (VS, weapons, posts)")
-        r = subprocess.run([sys.executable, os.path.join(HERE, "build_marker_assets.py"), a.game, raw])
+        r = subprocess.run([sys.executable, os.path.join(HERE, "build_marker_assets.py"), a.game, raw] + missing)
         if r.returncode:
             raise SystemExit("build_marker_assets.py failed")
+        json.dump(sorted(skip | (set(lp2_names()) - set(json.load(open(have))))), open(none, "w"))
     manifest = json.load(open(os.path.join(raw, "manifest.json")))
     names = lp2_names()
     os.makedirs(os.path.join(lib, "lp2"), exist_ok=True)

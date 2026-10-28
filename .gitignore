@@ -4,3 +4,4 @@ dist/
 editor/.godot/
 *.import
 __pycache__/
+*.uid
