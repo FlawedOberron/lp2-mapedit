@@ -21,6 +21,11 @@ const OBJECT_STYLE := {  # role -> [colour, size (m)]
 	"weapon": [Color(1.0, 0.9, 0.2), Vector3(0.8, 0.5, 0.8)],
 	"object": [Color(0.7, 0.3, 0.9), Vector3(1.2, 2.5, 1.2)],
 }
+# pickup colours: green = a loadout slot's weapon, orange = grenade, blue = VS weapon / gear (battle armor, flying
+# gear), red = an explicit weapon; yellow = no item (an LP1 record: the stock pickup)
+const PICKUP_COLOURS := {"slot": Color(0.25, 0.9, 0.3), "grenade": Color(1.0, 0.5, 0.1), "vs": Color(0.25, 0.55, 1.0),
+	"explicit": Color(0.95, 0.2, 0.2)}
+const PICKUP_RAISE := 0.3   # m: weapon models float above their marker, as the game shows them
 # weapon pickup ids (rObjSet +0x1a, the game's uWpXX classes). Slots: the match settings and loadouts pick the
 # weapon (the lobby's "only X" weapon rules turn pickups below 0x35 into 0x30-0x33). Names of fixed weapons come
 # from their models / vibration types where nothing better is known; 0x00 is the Anchor (grappling hook), not a pickup.
@@ -28,9 +33,10 @@ const OBJECT_STYLE := {  # role -> [colour, size (m)]
 # (mounted, no pickup / carry logic) and aren't offered
 const PICKUP_ITEMS := [
 	[-1, "Stock pickup (differs per game type)"],
-	[0x30, "Slot: Standard"], [0x31, "Slot: Short range"], [0x32, "Slot: Long range"], [0x33, "Slot: Heavy Weapons"],
-	[0x34, "Slot: Support"], [0x0c, "Slot: Handgun"], [0x15, "Grenade slot: Normal"], [0x16, "Grenade slot: Gum"],
-	[0x17, "Grenade slot: Disc"], [0x18, "Grenade slot: Release"], [0x19, "Grenade slot: Plasma"],
+	[0x30, "Slot: Standard (Assault Rifle)"], [0x31, "Slot: Short range (Shotgun)"], [0x32, "Slot: Long range (Rifle)"],
+	[0x33, "Slot: Heavy Weapons (Rocket Launcher)"], [0x34, "Slot: Support (Shield)"], [0x0c, "Slot: Handgun"],
+	[0x15, "Frag Grenade"], [0x16, "Gum Grenade"], [0x17, "Disk Grenade"], [0x18, "Dummy Grenade"],
+	[0x19, "Plasma Grenade"],
 	[0x01, "Machine Gun"], [0x02, "Fixed 02 (long range)"], [0x03, "Fixed 03 (energy)"],
 	[0x04, "Fixed 04 (heavy)"], [0x05, "Fixed 05 (short range)"], [0x06, "Fixed 06"], [0x0d, "Fixed 0D (handgun?)"],
 	[0x0e, "Fixed 0E (handgun?)"], [0x0f, "Fixed 0F"],
@@ -149,6 +155,8 @@ var dig_on: CheckBox
 var dig_count: SpinBox
 var dig_pile: OptionButton
 var baked_toggle: CheckButton
+var wire_toggle: CheckButton
+var wire_on_start := false   # --wireframe (tests)
 var col_toggle: CheckButton
 var info_win: Window
 var col_mesh: MeshInstance3D   # View collision: the movement collision, green see-through
@@ -166,7 +174,15 @@ var perf_grid: GridContainer
 var updating_ui := false
 var updates: Node
 
+func _notification(what: int) -> void:
+	# low-processor mode (project.godot) already redraws only on changes; in the background, cap it lower still
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT:
+		Engine.max_fps = 10
+	elif what == NOTIFICATION_APPLICATION_FOCUS_IN:
+		Engine.max_fps = 0
+
 func _ready() -> void:
+	RenderingServer.set_debug_generate_wireframes(true)   # before any mesh exists: the Wireframe toggle needs them
 	cfg.load(SETTINGS)
 	var bundle := bundle_dir()
 	if bundle != "":   # the release (Windows zip / AppImage): its own Python and tools, beside the executable
@@ -199,6 +215,7 @@ func _ready() -> void:
 			call_deferred("open_project", args[i + 1])
 		elif args[i] == "--screenshot" and i + 1 < args.size():
 			screenshot_path = args[i + 1]
+			OS.low_processor_usage_mode = false   # it waits on frames; idle redraw-on-change would never draw one
 		elif args[i] == "--select" and i + 1 < args.size():
 			select_on_start = int(args[i + 1])
 		elif args[i] == "--piece" and i + 1 < args.size():
@@ -221,6 +238,8 @@ func _ready() -> void:
 			call_deferred("toggle_info")
 		elif args[i] == "--collision":
 			call_deferred("_test_collision")
+		elif args[i] == "--wireframe":
+			wire_on_start = true
 		elif args[i] == "--lit":
 			baked = false
 		elif args[i] == "--bake-scale" and i + 1 < args.size():
@@ -233,7 +252,7 @@ func _ready() -> void:
 		var last: String = cfg.get_value("recent", "project", "")
 		if last != "" and DirAccess.dir_exists_absolute(last):
 			call_deferred("open_project", last)
-	log_line("LP2 Map Editor. Right mouse: look (WASD / Q E, Shift fast, wheel speed). Left click: select (Shift / Ctrl: add). " +
+	log_line("LP2 Map Editor. Right mouse: look (WASD, Q E / Ctrl Space down up, Shift fast, wheel speed). Left click: select (Shift / Ctrl: add). " +
 		"W / E / R: move / rotate / scale with the gizmo (Ctrl while dragging: snap). F: frame. End: drop to floor. " +
 		"Ctrl+D duplicate, Ctrl+G group, Ctrl+Shift+G ungroup, Delete, Ctrl+Z / Ctrl+Y undo / redo.")
 
@@ -377,7 +396,14 @@ func _build_ui() -> void:
 	col_toggle.tooltip_text = "Show what players walk on (the game's movement collision, with your geometry edits) as a green see-through mesh. Refreshes on Save"
 	col_toggle.toggled.connect(_on_collision)
 	bar.add_child(col_toggle)
+	wire_toggle = CheckButton.new()
+	wire_toggle.text = "Wireframe"
+	wire_toggle.tooltip_text = "Draw the view as wireframe, with the triangles in view counted (density, detail baking)"
+	wire_toggle.toggled.connect(_on_wireframe)
+	bar.add_child(wire_toggle)
 	_button(bar, "Rebuild preview", func(): build_preview(true))
+	if wire_on_start:
+		wire_toggle.button_pressed = true
 	set_tool(0)
 
 	var mid := HBoxContainer.new()
@@ -542,7 +568,7 @@ func _build_ui() -> void:
 	var krow := HBoxContainer.new()
 	kill_on = CheckBox.new()
 	kill_on.text = "Kill floor at (cm)"
-	kill_on.tooltip_text = "Players below this height die. Saved with the project; the game does not use it yet (needs the DLL's map volumes)"
+	kill_on.tooltip_text = "Players who fall below this height die: built into the map as the game's kill floor (a kill surface quad in the bullet collision under the whole map, like the stock maps)"
 	kill_on.toggled.connect(func(_b): _on_kill())
 	krow.add_child(kill_on)
 	kill_height = _spin(-1e6, 1e6, 10.0)
@@ -640,6 +666,8 @@ func _build_ui() -> void:
 	placer.set_script(load("res://place.gd"))
 	add_child(placer)
 	placer.setup(self)
+	for w: Window in [info_win, browser, mesh_builder, lighting, settings_win, new_win, fog_win, placer]:
+		w.window_input.connect(_on_tool_window_input.bind(w))   # Ctrl+S saves from any of them too
 	lighting_dialog = FileDialog.new()
 	lighting_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	lighting_dialog.access = FileDialog.ACCESS_FILESYSTEM
@@ -817,8 +845,9 @@ func open_project(dir: String) -> void:
 	library.load_imports(dir)
 	var lay: Variant = _read_json(dir.path_join(project["layout"]["file"]))
 	layout = _ints(lay) if lay is Dictionary else {"sets": []}
-	cfg.set_value("recent", "project", dir)
-	cfg.save(SETTINGS)
+	if screenshot_path == "":   # test runs (--screenshot) don't become the project the editor reopens
+		cfg.set_value("recent", "project", dir)
+		cfg.save(SETTINGS)
 	updating_ui = true
 	info_name.text = project["info"].get("name", "")
 	for i in info_size.item_count:
@@ -849,6 +878,11 @@ func open_project(dir: String) -> void:
 		mesh_builder.refresh()
 	if lighting.visible:
 		lighting.refresh()
+
+func _on_tool_window_input(e: InputEvent, w: Window) -> void:
+	if e is InputEventKey and e.pressed and not e.echo and e.ctrl_pressed and e.keycode == KEY_S:
+		save_project()
+		w.set_input_as_handled()
 
 func save_project() -> void:
 	if project_dir == "":
@@ -1011,6 +1045,9 @@ func build_preview(force: bool) -> void:
 		return
 	if force:
 		DirAccess.remove_absolute(project_dir.path_join(".preview/stage.key"))
+		if lighting.bake_settings().get("source", "lp1") == "bake":
+			save_project()   # lp2preview.py re-bakes from the project on disk
+			log_line("Saved first: the rebuilt preview is re-baked with the current lighting settings")
 	set_status("Building the stage preview...")
 	run_tool("lp2preview.py", ["--game", game, project_dir], load_stage)
 
@@ -1060,7 +1097,7 @@ func _copy_to_game() -> void:
 
 # ---------------------------------------------------------------- stage
 
-func load_stage() -> void:
+func load_stage(frame := true) -> void:
 	select([])
 	var t0 := Time.get_ticks_msec()
 	var err: String = geometry.load_preview(project_dir.path_join(".preview"), geometry_path())
@@ -1068,12 +1105,14 @@ func load_stage() -> void:
 		log_line(err + ": rebuild the preview")
 		return
 	log_line("Level geometry: %d pieces (%.1f s)" % [geometry.get_child_count(), (Time.get_ticks_msec() - t0) / 1000.0])
+	lighting.preview_bake()   # the new materials get the bake's live settings
 	_rebuild_prefabs()
 	_rebuild_outliner()
 	_update_stats()
 	_show_kill()
 	set_status("%s: stage loaded" % project["info"].get("name", ""))
-	frame_markers()
+	if frame:   # not after a bake: the view stays where it was
+		frame_markers()
 	if piece_on_start >= 0 and piece_on_start < geometry.get_child_count():
 		var p: Node3D = geometry.get_child(piece_on_start)
 		p.position.y += lift_on_start
@@ -1325,6 +1364,17 @@ func _load_collision(path: String) -> void:
 	(col_body.get_child(0) as CollisionShape3D).shape = shape
 	set_status("Collision: %d triangles" % n)
 
+func _on_wireframe(on: bool) -> void:
+	get_viewport().debug_draw = Viewport.DEBUG_DRAW_WIREFRAME if on else Viewport.DEBUG_DRAW_DISABLED
+	if not on:
+		wire_toggle.text = "Wireframe"
+		return
+	while wire_toggle.button_pressed:   # the count of what's drawn, while on
+		await get_tree().create_timer(0.5).timeout
+		var tris: Vector2i = geometry.triangles_in_view(camera)   # the stage's own (the renderer's count adds passes)
+		if wire_toggle.button_pressed:
+			wire_toggle.text = "Wireframe (%dk of %dk tris in view)" % [tris.x / 1000, tris.y / 1000]
+
 func _on_baked(on: bool) -> void:
 	baked = on
 	geometry.set_baked(on)
@@ -1518,7 +1568,7 @@ func _add_marker(d: Dictionary, is_object: bool) -> void:
 		box.size = style[1]
 		mi.mesh = box
 		mi.position.y = style[1].y / 2
-		mat.albedo_color = style[0]
+		mat.albedo_color = pickup_colour(d) if role == "weapon" else style[0]
 		var bs := BoxShape3D.new()
 		bs.size = style[1]
 		shape.shape = bs
@@ -1592,6 +1642,58 @@ func _marker_model(n: Node3D) -> void:
 	shape.shape = bs
 	shape.position = b.get_center()
 	n.set_meta("asset", key)
+	if d.get("role", "") == "weapon":
+		model.position.y += PICKUP_RAISE
+		b.position.y += PICKUP_RAISE
+		shape.position = b.get_center()
+		_pickup_frame(n, b.grow(0.1))
+
+static func pickup_colour(d: Dictionary) -> Color:
+	if not d.has("item"):
+		return OBJECT_STYLE["weapon"][0]
+	var it := int(d["item"])
+	if it >= 0x30 and it <= 0x34 or it == 0x0c:
+		return PICKUP_COLOURS["slot"]
+	if it >= 0x15 and it <= 0x19:
+		return PICKUP_COLOURS["grenade"]
+	if it >= 0x1c and it <= 0x1f or it >= 0x41:
+		return PICKUP_COLOURS["vs"]
+	return PICKUP_COLOURS["explicit"]
+
+func _pickup_frame(n: Node3D, b: AABB) -> void:
+	# the pickup's box: coloured edges plus faint faces, in its category's colour (pickup_colour)
+	var c := pickup_colour(n.get_meta("data"))
+	var am := ArrayMesh.new()
+	var lines := PackedVector3Array()
+	for e in [[0, 1], [1, 3], [3, 2], [2, 0], [4, 5], [5, 7], [7, 6], [6, 4], [0, 4], [1, 5], [2, 6], [3, 7]]:
+		lines.append(b.get_endpoint(e[0]))
+		lines.append(b.get_endpoint(e[1]))
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = lines
+	am.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
+	var lm := StandardMaterial3D.new()
+	lm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	lm.albedo_color = c
+	am.surface_set_material(0, lm)
+	var frame := MeshInstance3D.new()
+	frame.name = "frame"
+	frame.mesh = am
+	frame.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var faces := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = b.size
+	faces.mesh = bm
+	faces.position = b.get_center()
+	faces.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var fm := StandardMaterial3D.new()
+	fm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	fm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	fm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	fm.albedo_color = Color(c, 0.12)
+	faces.material_override = fm
+	frame.add_child(faces)
+	n.add_child(frame)
 
 func _place(n: Node3D) -> void:
 	var d: Dictionary = n.get_meta("data")
@@ -1835,10 +1937,18 @@ func refresh_marker(n: Node3D) -> void:
 	var ref: Variant = n.get_meta("item") if n.has_meta("item") else null
 	if ref != null and is_instance_valid(ref):
 		(ref as TreeItem).set_text(0, _marker_label(d, true))
-	var old: Node = n.get_node_or_null("model")
-	if old:
-		n.remove_child(old)
-		old.queue_free()
+	for nm in ["model", "frame"]:
+		var old: Node = n.get_node_or_null(nm)
+		if old:
+			n.remove_child(old)
+			old.queue_free()
+	if d.get("role", "") == "weapon":   # the item's category colour (pickup_colour)
+		var c := pickup_colour(d)
+		((n.get_child(0) as MeshInstance3D).material_override as StandardMaterial3D).albedo_color = c
+		for m in n.get_children():
+			if m is MeshInstance3D and m.material_override is StandardMaterial3D \
+					and (m.material_override as StandardMaterial3D).fixed_size:
+				(m.material_override as StandardMaterial3D).albedo_color = c
 	(n.get_child(0) as MeshInstance3D).visible = true
 	n.remove_meta("asset")
 	_marker_model(n)

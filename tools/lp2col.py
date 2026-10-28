@@ -137,6 +137,21 @@ def bvhc(items):
     return bytes(out)
 
 
+KILL = "kill"   # a triangle flag: the game's kill surface (record word 3 = 0x200, see kill_quad)
+
+
+def kill_quad(groups, y, margin=5000.0):
+    """a group with one flat quad at height y (cm) under the groups' whole x/z extent (+ margin): the stock maps'
+    kill floor. The game casts a ray down from each character into the bullet (tama) collision and kills it when
+    the hit surface's word 3 has 0x700 bits (DX9 uCharacterBase::vf49 0x9c3fb0 -> FUN_009ab9e0); stock maps use one
+    2-triangle 0x200 quad (NEOS: y -8100)."""
+    xs = [v[0] for g in groups for v in g["verts"]]
+    zs = [v[2] for g in groups for v in g["verts"]]
+    x0, x1, z0, z1 = min(xs) - margin, max(xs) + margin, min(zs) - margin, max(zs) + margin
+    verts = [(x0, y, z1), (x1, y, z0), (x0, y, z0), (x1, y, z1)]   # stock winding: normal +y
+    return dict(verts=verts, tris=[((0, 1, 2), KILL), ((3, 1, 0), KILL)])
+
+
 def write_lp2(groups, template):
     if template[:4] != b"SBC\xff":
         raise ValueError("template is not an LP2 rCollision")
@@ -148,7 +163,7 @@ def write_lp2(groups, template):
     surf_flags, surf_index = [], {}
 
     def surface(f):
-        lp2 = plain if f == 0x3FFFFF00 else (f & 0x3FFFFFFF) | 0x40000000
+        lp2 = KILL if f == KILL else plain if f == 0x3FFFFF00 else (f & 0x3FFFFFFF) | 0x40000000
         if lp2 not in surf_index:
             surf_index[lp2] = len(surf_flags)
             surf_flags.append(lp2)
@@ -185,6 +200,13 @@ def write_lp2(groups, template):
     out += struct.pack("<4f4f", *allb[:3], 0.0, *allb[3:], 0.0)
     out += b"".join(head) + tris + verts
     for f in surf_flags:
+        if f == KILL:   # the template's kill record, else the plain one with word 3 = 0x200
+            rec = next((t for t in tsurf if struct.unpack_from("<I", t, 12)[0] == 0x200), None)
+            if rec is None:
+                rec = bytearray(tsurf[tflags.index(plain)])
+                struct.pack_into("<I", rec, 12, 0x200)
+            out += bytes(rec)
+            continue
         out += struct.pack("<I", f) + tsurf[tflags.index(f) if f in tflags else 0][4:]
     out += b"".join(chunks)
     return bytes(out), surf_flags
@@ -197,7 +219,7 @@ def main():
     out, surf = write_lp2(groups, open(sys.argv[2], "rb").read())
     open(sys.argv[3], "wb").write(out)
     print(f"{sys.argv[3]}: {len(groups)} groups, {sum(len(g['tris']) for g in groups)} triangles, "
-          f"surfaces {', '.join(f'{s:#010x}' for s in surf)}, {len(out)} bytes")
+          f"surfaces {', '.join(s if s == KILL else f'{s:#010x}' for s in surf)}, {len(out)} bytes")
 
 
 if __name__ == "__main__":

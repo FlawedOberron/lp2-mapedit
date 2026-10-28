@@ -21,7 +21,8 @@ project.json (format "lp2map", version 1):
   geometry     optional: {file: geometry.json}, the editor's level geometry edits (lp2pieces.py: moved,
                hidden and copied pieces of the built stage, and their grouping; a copy with "map": "lp1/s900"
                is a piece of another map, from the editor's asset library)
-  environment  sun (direction towards it), tint, sky, bloom, curves {R,G,B: 4 points}, colours ("grey" | "stock"),
+  environment  sun (direction towards it), tint, sky, bloom, curves {R,G,B: [[x0..x3], [y0..y3]]: 4 points, input x ->
+               output y; the old flat 4-number form only ever set x and reads as neutral}, colours ("grey" | "stock"),
                atmosphere ("clear" = online01's | "stock"), water (null or height in cm), camera (null = an
                orbit round the map, or {cam: [[x,y,z] x4], tgt: [...]}), kill_floor (null or height in cm; set in
                the editor, not used by the game until the DLL's map volumes exist);
@@ -41,9 +42,19 @@ import arcx  # noqa: E402
 HERE = os.path.dirname(os.path.abspath(__file__))
 FORMAT, VERSION = "lp2map", 1
 ENVIRONMENT = dict(sun=[0.472, 0.848, 0.241], tint=[0.93, 0.97, 1.1], sky=[8.5, 9.2, 10], bloom=[0.42, 0.45, 0.5],
-                   curves={"R": [0, 0.215, 0.69, 0.97], "G": [0, 0.222, 0.70, 0.985], "B": [0, 0.227, 0.711, 1]},
+                   curves=None,
                    colours="grey", atmosphere="clear", water=None, camera=None, sun_colour=None, sky_colour=None,
                    ground_colour=None, ambient=None, scatter=None, skybox=None)
+NEUTRAL_CURVE = [[0, 0.333, 0.667, 1], [0, 0.333, 0.667, 1]]
+
+
+def curves(env):
+    """environment.curves -> {R, G, B: [[x0..x3], [y0..y3]]}; missing or old-form channels are neutral"""
+    c = env.get("curves") if isinstance(env.get("curves"), dict) else {}
+    ok = lambda v: isinstance(v, list) and len(v) == 2 and all(isinstance(h, list) and len(h) == 4 for h in v)
+    return {ch: c[ch] if ok(c.get(ch)) else NEUTRAL_CURVE for ch in "RGB"}
+
+
 LP1_MODEL, LP1_COLLISION, LP1_HAVOK = 0x1041bd9e, 0x3900dad0, 0x3c3d0c05
 
 

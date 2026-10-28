@@ -1,7 +1,8 @@
 extends Window
 # Floating lighting window (L): the sun, the sky light (hemisphere from above / below) and ambient, the sky dome and
-# atmosphere, and placed point / spot lights. Settings go to project.json's environment (lp2light.py / lp2sky.py at
-# export); placed lights to project.json "lights" and show as markers (Lights in the outliner) with a Godot light each.
+# atmosphere, colour grading (tone curves, curves.gd; bloom colour), and placed point / spot lights. Settings go to
+# project.json's environment (lp2light.py / lp2sky.py at export); placed lights to project.json "lights" and show as
+# markers (Lights in the outliner) with a Godot light each.
 # Colours are stored as the game takes them: colour x brightness.
 
 const STOCK_SUN := [2.43, 2.43, 2.43]   # online00's sun as the export greys it (x environment.tint)
@@ -14,6 +15,23 @@ const MAP_NAMES := {"00": "Desecration", "01": "Turbulent Jungle", "02": "Kraftw
 	"09": "Friction", "10": "Pirate Fortress", "11": "Back to the Island", "12": "Cube", "15": "Frozen Wasteland"}
 const SKY_MAPS := ["03", "06", "07", "10", "12", "15"]   # stock maps with a sky model (lp2sky.py list)
 const LIGHT_SIZE := 0.35
+# the ray-traced bake (lp2bake.py; project stage.light): defaults as its DEFAULTS. Live ones show at once (the
+# baked shader combines the stored light components); the rest need "Bake lighting"
+const BAKE_DEFAULTS := {"source": "lp1", "sun": 0.4, "sky": 1.0, "lights": 1.0, "glow": 1.0, "exposure": 0.0,
+	"min_light": 0.01, "bounce": 1.0, "bounces": 2, "samples": 64, "detail": 0}
+const BAKE_CALIBRATION := 0.48   # lp2bake.py CALIBRATION
+const BAKE_FIELDS := [
+	["sun", "Sun in bake", 0.0, 5.0, 0.05, "Strength of the sun's direct light in the bake (x the Sun colour above). Live"],
+	["sky", "Sky in bake", 0.0, 5.0, 0.05, "Strength of the sky and ground light in the bake (x their colours above). Live"],
+	["lights", "Placed lights", 0.0, 5.0, 0.05, "Strength of the point and spot lights in the bake. Live"],
+	["glow", "Glow", 0.0, 10.0, 0.05, "Strength of glowing materials. Live"],
+	["exposure", "Exposure (EV)", -4.0, 4.0, 0.1, "The whole bake brighter or darker: +1 doubles it. Live"],
+	["min_light", "Min light", 0.0, 0.5, 0.005, "The darkest the bake goes (a soft floor), so nothing is pitch black. Live"],
+	["bounces", "Bounces", 0.0, 4.0, 1.0, "How many times light bounces between surfaces. Needs a re-bake"],
+	["bounce", "Bounce strength", 0.0, 1.5, 0.05, "How much light surfaces pass on (x their colour). Needs a re-bake"],
+	["samples", "Quality (rays)", 8.0, 256.0, 8.0, "Sky rays per vertex: more is smoother and slower. Needs a re-bake"],
+	["detail", "Detail (+% vertices)", 0.0, 100.0, 5.0, "Splits triangles where the light changes sharply (shadow edges, doorways, wall feet), up to this many more vertices: sharper light, bigger stage model, slower bake. Needs a re-bake"]]
+const NEUTRAL_CURVE := [[0.0, 0.333, 0.667, 1.0], [0.0, 0.333, 0.667, 1.0]]
 
 var main: Node
 var presets := {}            # lp2light.py presets: map number -> day values
@@ -26,9 +44,14 @@ var sky_file: Button
 var sky_bright: SpinBox
 var haze_pick: OptionButton
 var haze_density: SpinBox
+var grade_pick: OptionButton
+var curve_ed: Control        # curves.gd
 var light_ed := {}           # the window's light editor: {box, title, rows: field -> control, node: the light shown}
 var popup_ed := {}           # the same in the right-click popup
 var light_popup: PopupPanel
+var bake_source: OptionButton
+var bake_rows := {}          # stage.light key -> SpinBox
+var bake_btn: Button
 var _updating := false
 
 func _init() -> void:
@@ -128,6 +151,62 @@ func setup(m: Node) -> void:
 	v.add_child(tg)
 
 	v.add_child(HSeparator.new())
+	v.add_child(_heading("Baked lighting"))
+	var bk := GridContainer.new()
+	bk.columns = 2
+	bk.add_child(main._label("Source"))
+	bake_source = OptionButton.new()
+	bake_source.add_item("LP1 lightmap")
+	bake_source.add_item("Ray-traced bake")
+	bake_source.tooltip_text = "The level's light: the original LP1 lightmap, or our own bake (sun, sky, placed lights, glow and bounces)"
+	bake_source.item_selected.connect(func(_i): _on_bake_changed())
+	bk.add_child(bake_source)
+	for f in BAKE_FIELDS:
+		bk.add_child(main._label(f[1]))
+		bake_rows[f[0]] = _num(bk, f[2], f[3], f[4], f[5], _on_bake_changed)
+	v.add_child(bk)
+	bake_btn = main._button(v, "Bake lighting", bake_now)
+	bake_btn.tooltip_text = "Ray trace the level's light (about half a minute; a minute or more with detail). Saves the project first"
+
+	v.add_child(HSeparator.new())
+	v.add_child(_heading("Colour grading"))
+	var gr := HBoxContainer.new()
+	grade_pick = OptionButton.new()
+	grade_pick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	grade_pick.tooltip_text = "Tone curves: neutral, or a stock map's grade"
+	gr.add_child(grade_pick)
+	main._button(gr, "Use", apply_grade)
+	v.add_child(gr)
+	var chs := HBoxContainer.new()
+	var group := ButtonGroup.new()
+	for ch in ["All", "R", "G", "B"]:
+		var b := Button.new()
+		b.text = ch
+		b.toggle_mode = true
+		b.button_group = group
+		b.button_pressed = ch == "All"
+		b.tooltip_text = "Edit every channel together" if ch == "All" else "Edit the %s curve" % {"R": "red", "G": "green", "B": "blue"}[ch]
+		b.pressed.connect(func(): curve_ed.set_channel(ch))
+		chs.add_child(b)
+	v.add_child(chs)
+	curve_ed = preload("res://curves.gd").new()
+	curve_ed.tooltip_text = "Drag a point: across = the input brightness, up = what it becomes. Diagonal = no change"
+	curve_ed.changed.connect(_on_curves)
+	curve_ed.edited.connect(func(): _preview_grade(curve_ed.curves))
+	v.add_child(curve_ed)
+	var bg2 := GridContainer.new()
+	bg2.columns = 3
+	bg2.add_child(main._label("Bloom"))
+	var bcp := ColorPickerButton.new()
+	bcp.custom_minimum_size = Vector2(70, 0)
+	bcp.edit_alpha = false
+	bcp.tooltip_text = "The glow's colour around bright areas"
+	bcp.color_changed.connect(func(_c): _on_changed())
+	bg2.add_child(bcp)
+	rows["bloom"] = [bcp, _num(bg2, 0.0, 2.0, 0.01, "Bloom strength (stock 0.3 to 0.6)")]
+	v.add_child(bg2)
+
+	v.add_child(HSeparator.new())
 	v.add_child(_heading("Placed lights"))
 	var lr := HBoxContainer.new()
 	main._button(lr, "Add point light", func(): add_light("point")).tooltip_text = "A light shining every way, where the view points"
@@ -172,6 +251,16 @@ func env() -> Dictionary:
 		main.project["environment"] = {}
 	return main.project["environment"]
 
+static func curves_of(e: Dictionary) -> Dictionary:
+	# environment.curves -> R / G / B: [[x0..x3], [y0..y3]]; missing or the old flat form (x only) -> neutral
+	var c: Dictionary = e.get("curves") if e.get("curves") is Dictionary else {}
+	var out := {}
+	for ch in ["R", "G", "B"]:
+		var v: Variant = c.get(ch)
+		var ok: bool = v is Array and v.size() == 2 and v[0] is Array and v[1] is Array and v[0].size() == 4 and v[1].size() == 4
+		out[ch] = (v as Array).duplicate(true) if ok else NEUTRAL_CURVE.duplicate(true)
+	return out
+
 static func split(c: Variant, fallback: Array) -> Array:
 	# stored colour x brightness -> [Color, brightness]
 	var v: Array = c if c is Array else fallback
@@ -190,7 +279,7 @@ func refresh() -> void:
 	var stock_sun := [STOCK_SUN[0] * tint[0], STOCK_SUN[1] * tint[1], STOCK_SUN[2] * tint[2]]
 	for k in rows:
 		var fb: Array = {"sun_colour": stock_sun, "sky_colour": STOCK_SKY, "ground_colour": STOCK_GROUND,
-			"ambient": STOCK_AMBIENT, "sky": [8.5, 9.2, 10]}[k]
+			"ambient": STOCK_AMBIENT, "sky": [8.5, 9.2, 10], "bloom": [0.42, 0.45, 0.5]}[k]
 		var cb := split(e.get(k), fb)
 		rows[k][0].color = cb[0]
 		rows[k][1].value = cb[1]
@@ -210,6 +299,10 @@ func refresh() -> void:
 	for i in haze_pick.item_count:
 		if haze_pick.get_item_metadata(i) == sc.get("from", "01"):
 			haze_pick.select(i)
+	curve_ed.set_curves(curves_of(e))
+	bake_source.select(1 if _bake("source") == "bake" else 0)
+	for k in bake_rows:
+		bake_rows[k].value = float(_bake(k))
 	_updating = false
 	_show_light()
 	apply_preview()
@@ -226,14 +319,25 @@ func _load_presets() -> void:
 		return
 	var d: Variant = JSON.parse_string(FileAccess.get_file_as_string(p))
 	presets = d if d is Dictionary else {}
+	if not presets.is_empty() and not (presets.values()[0] as Dictionary).has("curves"):   # made before curves: redo
+		presets = {}
+		DirAccess.remove_absolute(p)
+		_load_presets()
+		return
 	preset_pick.clear()
 	haze_pick.clear()
+	grade_pick.clear()
+	grade_pick.add_item("Neutral")
+	grade_pick.set_item_metadata(0, "")
 	for k in presets:
 		preset_pick.add_item("%s (%s)" % [MAP_NAMES.get(k, k), k])
 		preset_pick.set_item_metadata(preset_pick.item_count - 1, k)
 		if (presets[k] as Dictionary).has("scatter"):
 			haze_pick.add_item(MAP_NAMES.get(k, k) + ("  (default: clear)" if k == "01" else ""))
 			haze_pick.set_item_metadata(haze_pick.item_count - 1, k)
+		if (presets[k] as Dictionary).has("curves"):
+			grade_pick.add_item("%s's grade" % MAP_NAMES.get(k, k))
+			grade_pick.set_item_metadata(grade_pick.item_count - 1, k)
 
 func _store_rgb(k: String) -> void:
 	var c: Color = rows[k][0].color
@@ -295,6 +399,21 @@ func apply_preset() -> void:
 	main.log_line("Lighting from %s's day." % MAP_NAMES.get(k, k))
 	refresh()
 
+func apply_grade() -> void:
+	if grade_pick.selected < 0 or main.project_dir == "":
+		return
+	var k: String = grade_pick.get_item_metadata(grade_pick.selected)
+	main._push_undo("")
+	env()["curves"] = curves_of({"curves": presets[k]["curves"]}) if k != "" else curves_of({})
+	main.log_line("Colour grading: %s." % ("neutral" if k == "" else MAP_NAMES.get(k, k) + "'s"))
+	refresh()
+
+func _on_curves() -> void:
+	if _updating or main.project_dir == "":
+		return
+	main._push_undo("lighting")
+	env()["curves"] = curve_ed.curves.duplicate(true)
+
 func reset_light() -> void:
 	main._push_undo("")
 	var e := env()
@@ -332,7 +451,72 @@ func apply_preview() -> void:
 	we.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	we.ambient_light_color = (sky[0] * sky[1] + amb[0] * amb[1]).clamp()
 	we.ambient_light_energy = 2.0 * (sky[1] + amb[1])
+	_preview_grade(curves_of(e))
 	_preview_sky()
+	preview_bake()
+
+# ---------------------------------------------------------------- the ray-traced bake
+
+func bake_settings() -> Dictionary:
+	if not main.project.has("stage"):
+		main.project["stage"] = {}
+	if not (main.project["stage"].get("light") is Dictionary):
+		main.project["stage"]["light"] = {}
+	return main.project["stage"]["light"]
+
+func _bake(k: String) -> Variant:
+	return bake_settings().get(k, BAKE_DEFAULTS[k])
+
+func _on_bake_changed() -> void:
+	if _updating or main.project_dir == "":
+		return
+	var b := bake_settings()
+	b["source"] = "bake" if bake_source.selected == 1 else "lp1"
+	for k in bake_rows:
+		b[k] = int(bake_rows[k].value) if k in ["bounces", "samples", "detail"] else bake_rows[k].value
+	preview_bake()
+
+func preview_bake() -> void:
+	# the live settings on the baked materials, as lp2bake.py combine()
+	if main.project_dir == "" or main.geometry == null:
+		return
+	var e := env()
+	var raw := func(k: String, fallback: Array) -> Vector3:
+		var c: Array = e.get(k) if e.get(k) is Array else fallback
+		return Vector3(c[0], c[1], c[2])
+	var sky := float(_bake("sky"))
+	main.geometry.set_bake_params({
+		"use_bake": _bake("source") == "bake" and not main.geometry.bake_ch.is_empty(),
+		"sun_k": raw.call("sun_colour", STOCK_SUN) * float(_bake("sun")),
+		"sky_k": raw.call("sky_colour", STOCK_SKY) * sky,
+		"ground_k": raw.call("ground_colour", STOCK_GROUND) * sky,
+		"lights_k": float(_bake("lights")),
+		"glow_k": float(_bake("glow")),
+		"gain": BAKE_CALIBRATION * pow(2.0, float(_bake("exposure"))),
+		"min_light": float(_bake("min_light"))})
+
+func bake_now() -> void:
+	if main.project_dir == "":
+		return
+	var b := bake_settings()
+	b["source"] = "bake"
+	bake_source.select(1)
+	main.save_project()   # the bake reads the project from disk
+	bake_btn.disabled = true
+	main.set_status("Baking the lighting...")
+	main.run_tool("lp2bake.py", [main.project_dir], func():
+		bake_btn.disabled = false
+		main.load_stage(false)
+		main.set_status("Lighting baked"))
+
+func _preview_grade(c: Dictionary) -> void:
+	# the tone curves as the viewport's colour correction (neutral curves: off)
+	var we: Environment = main.world_env
+	var neutral := true
+	for ch in c:
+		neutral = neutral and c[ch] == NEUTRAL_CURVE
+	we.adjustment_enabled = not neutral
+	we.adjustment_color_correction = null if neutral else preload("res://curves.gd").lut(c)
 
 func _preview_sky() -> void:
 	var we: Environment = main.world_env

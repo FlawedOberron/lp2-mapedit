@@ -1,6 +1,6 @@
 extends Camera3D
-# Free-fly camera: hold the right mouse button to look, WASD to move, Q / E down / up,
-# Shift faster, mouse wheel (while looking) changes the speed. A quick right click (no turn) is a click: right_clicked.
+# Free-fly camera: hold the right mouse button to look, WASD to move, Q / E or Ctrl / Space down / up,
+# Shift faster (keys go to the camera only while looking: never typed into a focused field), mouse wheel (while looking) changes the speed. A quick right click (no turn) is a click: right_clicked.
 # Middle drag pans: the point grabbed under the mouse follows it (sideways and up / down).
 
 signal right_clicked(at: Vector2)
@@ -33,11 +33,19 @@ func _apply() -> void:
 func is_looking() -> bool:
 	return _look
 
+const MOVE_KEYS := [KEY_W, KEY_A, KEY_S, KEY_D, KEY_Q, KEY_E, KEY_SPACE, KEY_CTRL, KEY_SHIFT]
+
+func _input(e: InputEvent) -> void:
+	# before the GUI sees them: while looking, the camera keys are the camera's (no typing, no shortcuts)
+	if _look and e is InputEventKey and e.keycode in MOVE_KEYS:
+		get_viewport().set_input_as_handled()
+
 func _unhandled_input(e: InputEvent) -> void:
 	if e is InputEventMouseButton:
 		if e.button_index == MOUSE_BUTTON_RIGHT:
 			_look = e.pressed
 			if e.pressed:
+				get_viewport().gui_release_focus()   # a field focused before must not get WASD after
 				_press_at = e.position
 				_press_time = Time.get_ticks_msec()
 				_turned = 0.0
@@ -84,8 +92,8 @@ func _process(dt: float) -> void:
 	if Input.is_key_pressed(KEY_S): v.z += 1
 	if Input.is_key_pressed(KEY_A): v.x -= 1
 	if Input.is_key_pressed(KEY_D): v.x += 1
-	if Input.is_key_pressed(KEY_E): v.y += 1
-	if Input.is_key_pressed(KEY_Q): v.y -= 1
+	if Input.is_key_pressed(KEY_E) or Input.is_key_pressed(KEY_SPACE): v.y += 1
+	if Input.is_key_pressed(KEY_Q) or Input.is_key_pressed(KEY_CTRL): v.y -= 1
 	if v == Vector3.ZERO:
 		return
 	var s := speed * (4.0 if Input.is_key_pressed(KEY_SHIFT) else 1.0)

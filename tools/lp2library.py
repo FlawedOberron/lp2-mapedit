@@ -157,8 +157,11 @@ def lp2_names():
     names = {}
     for tid, model, _size, flying in A.VS_TYPES:
         names[f"vs_{tid:02x}"] = ("Vehicles", f"VS {tid:02X} ({model}{', flying' if flying else ''})")
+    defaults = {0x30: "Assault Rifle", 0x31: "Shotgun", 0x32: "Rifle", 0x33: "Rocket Launcher", 0x34: "Shield", 0x0c: "Handgun",
+                0x15: "Frag Grenade", 0x16: "Gum Grenade", 0x17: "Disk Grenade", 0x18: "Dummy Grenade",
+                0x19: "Plasma Grenade"}   # a slot's default (variant 00) weapon
     for w in sorted({w for w, _ in A.PICKUPS} | set(A.VS_WEAPONS)):
-        names[f"wp_{w:02x}"] = ("Weapons", f"Weapon {w:02X}" + (" (VS mount)" if w in A.VS_WEAPONS else ""))
+        names[f"wp_{w:02x}"] = ("Weapons", defaults.get(w) or f"Weapon {w:02X}" + (" (VS mount)" if w in A.VS_WEAPONS else ""))
     for _item, model, title in A.POSTS:
         names[f"om_{model[2:]}"] = ("Objects", title)
     return names

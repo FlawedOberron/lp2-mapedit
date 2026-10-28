@@ -41,9 +41,10 @@ Map projects go in `Documents/LP2 Maps` by default. A project is a folder (`proj
 
 ## Controls
 
-- Hold the right mouse button to look; WASD to move, Q / E down / up, Shift for faster, wheel for speed.
+- Hold the right mouse button to look; WASD to move, Q or Ctrl / E or Space down / up, Shift for faster, wheel for speed.
 - Left click selects (Shift / Ctrl adds). W / E / R: move / rotate / scale. F frames, End drops to the floor.
 - Ctrl+D duplicates, Ctrl+G groups, Delete deletes, Ctrl+Z / Ctrl+Y undo / redo.
+- Ctrl+S saves from any window.
 - Windows: B Browser, M Mesh builder, P Preview (walk the map), L Lighting, I Map info, H Fog & weather, T Place.
 
 There's more detail in [editor/README.md](editor/README.md).

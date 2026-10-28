@@ -14,7 +14,7 @@ import argparse, hashlib, io, json, os, struct, subprocess, sys, tempfile
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import lp2mapc, lp2pieces, lp2project, mod2obj, tex2dds  # noqa: E402
+import lp2bake, lp2mapc, lp2pieces, lp2project, mod2obj, tex2dds  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STAGE_FMT, STRIDE = 0x49B4F022, 28
@@ -233,7 +233,8 @@ def build(game, folder, max_tex=1024, log=print):
     p = lp2project.load(folder)
     prev = os.path.join(folder, ".preview")
     os.makedirs(prev, exist_ok=True)
-    key = hashlib.sha1(json.dumps([p["stage"], max_tex, "geo3"], sort_keys=True).encode()).hexdigest()
+    stage_key = {k: v for k, v in p["stage"].items() if k != "light"}   # the bake settings don't change the geometry
+    key = hashlib.sha1(json.dumps([stage_key, max_tex, "geo3"], sort_keys=True).encode()).hexdigest()
     geo, keyf = os.path.join(prev, "geo.json"), os.path.join(prev, "stage.key")
     if os.path.exists(geo) and os.path.exists(keyf) and open(keyf).read() == key:
         add_texture_sizes(prev)
@@ -267,6 +268,11 @@ def build(game, folder, max_tex=1024, log=print):
     g["stats"] = stats
     json.dump(g, open(geo, "w"), separators=(",", ":"))
     open(keyf, "w").write(key)
+    for f in ("bake.bin", "geo_base.bin", "geo_base.json"):   # the old geometry's
+        os.path.exists(os.path.join(prev, f)) and os.remove(os.path.join(prev, f))
+    if lp2bake.settings(p)["source"] == "bake":
+        log("baking the lighting (lp2bake.py)")
+        lp2bake.bake_preview(folder, log)
     print("@progress 1.0 done", flush=True)
     log(f"geometry: {stats['vertices']} vertices, {stats['triangles']} triangles, {n} atoms, {len(g['tree'])} pieces, "
         f"{stats['materials']} materials")

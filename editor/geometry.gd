@@ -17,6 +17,7 @@ var nrm: PackedVector3Array
 var uv: PackedVector2Array
 var col: PackedColorArray
 var idx: PackedInt32Array
+var bake_ch: Array = []   # lp2bake.py's light components: 4 PackedFloat32Array (CUSTOM0-3, RGBA per vertex), or empty
 var atom_blocks := {}   # atom -> [block, ...]; block = [atom, mat, v0, vn, i0, in]
 var atom_tris := PackedInt32Array()
 var atom_verts := PackedInt32Array()
@@ -54,6 +55,7 @@ func load_data(prev: String) -> String:
 	uv = _slice(bin, a["uv"]).to_vector2_array()
 	col = _slice(bin, a["col"]).to_color_array()
 	idx = _slice(bin, a["idx"]).to_int32_array()
+	load_bake(prev)
 	var n := int(data["stats"]["atoms"])
 	atom_tris.resize(n)
 	atom_verts.resize(n)
@@ -120,6 +122,18 @@ func _add_pieces(geometry_path: String) -> void:
 	if loose.size():
 		add_piece({"name": "unsorted", "members": loose}, Transform3D.IDENTITY, true)
 
+func load_bake(prev: String) -> void:
+	bake_ch = []
+	var f := prev.path_join("bake.bin")
+	if not FileAccess.file_exists(f):
+		return
+	var b := FileAccess.get_file_as_bytes(f)
+	var n := pos.size() * 16
+	if b.size() != n * 4:
+		return   # from an older preview
+	for i in 4:
+		bake_ch.append(b.slice(i * n, (i + 1) * n).to_float32_array())
+
 func _slice(bin: PackedByteArray, r: Array) -> PackedByteArray:
 	return bin.slice(int(r[0]), int(r[0]) + int(r[1]))
 
@@ -176,10 +190,12 @@ func _make_materials(prev: String) -> void:
 			if img:
 				img.generate_mipmaps()
 				tex = ImageTexture.create_from_image(img)
-		var lit := StandardMaterial3D.new()
-		lit.albedo_texture = tex
-		lit.roughness = 1.0
-		lit.cull_mode = BaseMaterial3D.CULL_DISABLED
+		var lit := ShaderMaterial.new()
+		lit.shader = preload("res://lit.gdshader")
+		lit.set_shader_parameter("bake_scale", bake_scale)
+		if tex:
+			lit.set_shader_parameter("albedo", tex)
+			lit.set_shader_parameter("has_texture", true)
 		materials_lit.append(lit)
 		var sm := ShaderMaterial.new()
 		sm.shader = preload("res://baked.gdshader")
@@ -188,6 +204,12 @@ func _make_materials(prev: String) -> void:
 			sm.set_shader_parameter("albedo", tex)
 			sm.set_shader_parameter("has_texture", true)
 		materials_baked.append(sm)
+
+func set_bake_params(p: Dictionary) -> void:
+	# the live bake settings (lighting.gd) on this map's baked materials
+	for m in materials_baked:
+		for k in p:
+			m.set_shader_parameter(k, p[k])
 
 func set_baked(on: bool) -> void:
 	baked = on
@@ -261,7 +283,8 @@ func build_mesh(t: Dictionary) -> ArrayMesh:
 		for b in g.atom_blocks.get(m["atom"], []):
 			var mat: Variant = b[1] if g == self else "%s|%d" % [m["map"], b[1]]
 			if not by_mat.has(mat):
-				by_mat[mat] = [PackedVector3Array(), PackedVector3Array(), PackedVector2Array(), PackedColorArray(), PackedInt32Array()]
+				by_mat[mat] = [PackedVector3Array(), PackedVector3Array(), PackedVector2Array(), PackedColorArray(), PackedInt32Array(),
+					PackedFloat32Array(), PackedFloat32Array(), PackedFloat32Array(), PackedFloat32Array()]
 			var acc: Array = by_mat[mat]
 			var base: int = (acc[0] as PackedVector3Array).size()
 			var v0: int = b[2]
@@ -270,6 +293,13 @@ func build_mesh(t: Dictionary) -> ArrayMesh:
 			acc[1].append_array(nb * g.nrm.slice(v0, v0 + vn))
 			acc[2].append_array(g.uv.slice(v0, v0 + vn))
 			acc[3].append_array(g.col.slice(v0, v0 + vn))
+			for c in 4:   # the bake's channels (zeros, i.e. not baked: the plain colour)
+				if g.bake_ch.is_empty():
+					var z := PackedFloat32Array()
+					z.resize(vn * 4)
+					acc[5 + c].append_array(z)
+				else:
+					acc[5 + c].append_array(g.bake_ch[c].slice(v0 * 4, (v0 + vn) * 4))
 			var ii: PackedInt32Array = g.idx.slice(b[4], b[4] + b[5])
 			if flip:
 				for i in range(0, ii.size(), 3):
@@ -290,9 +320,19 @@ func build_mesh(t: Dictionary) -> ArrayMesh:
 		arr[Mesh.ARRAY_TEX_UV] = acc[2]
 		arr[Mesh.ARRAY_COLOR] = acc[3]
 		arr[Mesh.ARRAY_INDEX] = acc[4]
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+		var flags := 0
+		if not bake_ch.is_empty():
+			for c in 4:
+				arr[Mesh.ARRAY_CUSTOM0 + c] = acc[5 + c]
+			flags = (Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM0_SHIFT) | (Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM1_SHIFT) \
+				| (Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM2_SHIFT) | (Mesh.ARRAY_CUSTOM_RGBA_FLOAT << Mesh.ARRAY_FORMAT_CUSTOM3_SHIFT)
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr, [], {}, flags)
 		mats.append(mat)
 	mesh.set_meta("mats", mats)
+	var tris := 0
+	for acc in by_mat.values():
+		tris += (acc[4] as PackedInt32Array).size() / 3
+	mesh.set_meta("tris", tris)
 	return mesh
 
 func material(mat: Variant) -> Material:
@@ -309,6 +349,31 @@ func src(m: Dictionary) -> Node:
 	if not m.has("map"):
 		return self
 	return library.map_geometry_rel(m["map"]) if library else null
+
+func triangles_in_view(cam: Camera3D) -> Vector2i:
+	# (stage triangles in pieces the camera sees, all of them): the Wireframe toggle's count
+	var planes := cam.get_frustum()
+	var seen := 0
+	var total := 0
+	for p in pieces():
+		var mi := p.get_child(0) as MeshInstance3D if p.get_child_count() else null
+		if mi == null or mi.mesh == null:
+			continue
+		var t := int(mi.mesh.get_meta("tris", 0))
+		total += t
+		if not p.visible:
+			continue
+		var box: AABB = mi.global_transform * mi.get_aabb()
+		var c := box.get_center()
+		var r := box.size.length() / 2
+		var inside := true
+		for pl: Plane in planes:
+			if pl.distance_to(c) > r:
+				inside = false
+				break
+		if inside:
+			seen += t
+	return Vector2i(seen, total)
 
 func rebuild(p: Node3D) -> void:
 	for c in p.get_children():

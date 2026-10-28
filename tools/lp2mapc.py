@@ -26,7 +26,7 @@ import argparse, json, math, os, shutil, struct, subprocess, sys, tempfile, zipf
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import arcx, lp2clean, lp2col, lp2pieces, lp2project, lp2scenebox, lp2stage, lp2weather, mapslot, sbc  # noqa: E402
+import arcx, lp2bake, lp2clean, lp2col, lp2pieces, lp2project, lp2scenebox, lp2stage, lp2weather, mapslot, sbc  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ARCS = {"main": "arcXmlTmpPC/aArea_ONLINE_00.arc", "v": "arcXmlTmpPC/variable/aArea_ONLINE_00_v.arc",
@@ -396,6 +396,9 @@ def compile_project(game, folder, out_zip, work=None, log=print, library=None):
             pieces = (S, per_mesh, n)
             log(f"  geometry edits: {len(geo.get('xf') or {})} atoms moved, {len(geo.get('hidden') or [])} hidden, "
                 f"{len(geo.get('copies') or [])} copies")
+        if lp2bake.settings(p)["source"] == "bake":   # our ray-traced light instead of the LP1 lightmap's
+            report(0.57, "baking the lighting")
+            lp2bake.bake_stage(os.path.join(stage, *STAGE_DIR.split("\\"), "online00.rModel"), folder, p, log)
         sky = env.get("skybox") or {"type": "map"}
         if sky.get("type") in ("stock", "panorama"):
             report(0.58, "sky")
@@ -412,18 +415,24 @@ def compile_project(game, folder, out_zip, work=None, log=print, library=None):
         log("collision + physics")
         report(0.6, "collision")
         files = {}
+        kill = p.get("environment", {}).get("kill_floor")
         for key, n in (("lp1_move", "atarionline00"), ("lp1_bullet", "tamaonline00")):
             out = W(n + ".rCollision")
-            if pieces:
+            if pieces or (kill is not None and key == "lp1_bullet"):
                 groups = lp2col.read_sbc1(open(P(p["collision"][key]), "rb").read())
-                groups, (mv, dr, cp) = lp2pieces.apply_collision(groups, *pieces, geo)
-                extra = lp2pieces.foreign_collision(library, geo, key, folder)
-                groups += extra
-                if extra:
-                    log(f"  {n}: {sum(len(g['tris']) for g in extra)} triangles from other maps' pieces")
+                if pieces:
+                    groups, (mv, dr, cp) = lp2pieces.apply_collision(groups, *pieces, geo)
+                    extra = lp2pieces.foreign_collision(library, geo, key, folder)
+                    groups += extra
+                    if extra:
+                        log(f"  {n}: {sum(len(g['tris']) for g in extra)} triangles from other maps' pieces")
+                    log(f"  {n}: {mv} triangles moved, {dr} dropped, {cp} copied with the geometry")
+                if kill is not None and key == "lp1_bullet":
+                    # the game's kill floor: a 0x200 surface quad in the bullet collision (lp2col.kill_quad)
+                    groups.append(lp2col.kill_quad(groups, float(kill)))
+                    log(f"  {n}: kill floor at {float(kill) / 100:.1f} m")
                 data, _ = lp2col.write_lp2(groups, open(tmpl[n], "rb").read())
                 open(out, "wb").write(data)
-                log(f"  {n}: {mv} triangles moved, {dr} dropped, {cp} copied with the geometry")
             else:
                 log("  " + tool("lp2col.py", P(p["collision"][key]), tmpl[n], out).strip().split(": ", 1)[1])
             files[f"{tag}\\{n}.rCollision"] = out
@@ -478,7 +487,7 @@ def compile_project(game, folder, out_zip, work=None, log=print, library=None):
                     open(os.path.join(li, b + "." + cls), "wb").write(data)
         json.dump(env["camera"] or camera(floor), open(W("cam.json"), "w"))
         bounds = f"{floor.lo[0] - 500:.0f},{floor.lo[2] - 500:.0f},{floor.hi[0] + 500:.0f},{floor.hi[2] + 500:.0f}"
-        curves = ";".join(f"{c}:{csv(v)}" for c, v in env["curves"].items())
+        curves = ";".join(f"{c}:{csv(v[0])}/{csv(v[1])}" for c, v in lp2project.curves(env).items())
         light_env = {k: env.get(k) for k in ("sun_colour", "sky_colour", "ground_colour", "ambient", "scatter")}
         light_env["lights"] = p.get("lights") or []
         json.dump(light_env, open(W("light_env.json"), "w"))

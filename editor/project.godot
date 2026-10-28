@@ -7,6 +7,7 @@ config/name="LP2 Map Editor"
 config/description="Map editor for Lost Planet 2 (Recolonised) custom maps"
 run/main_scene="res://main.tscn"
 config/icon="res://icon.png"
+run/low_processor_mode=true
 config/use_custom_user_dir.template=true
 config/custom_user_dir_name.template="lp2-mapedit"
 config/features=PackedStringArray("4.7", "Forward Plus")

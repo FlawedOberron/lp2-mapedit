@@ -5,7 +5,7 @@
 #
 # Needs (in .dl/, see packaging/README.md): Godot_v4.7-stable_linux.x86_64 with the 4.7 export templates installed,
 # python-build-standalone 3.12 install_only tarballs for Linux and Windows, appimagetool-x86_64.AppImage.
-# Each release: the editor executable, python/ (with numpy and Pillow) and tools/ side by side.
+# Each release: the editor executable, python/ (with numpy, Pillow and embreex) and tools/ side by side.
 set -eu
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 VERSION=${1:-dev}
@@ -13,7 +13,7 @@ DL=$REPO/.dl
 GODOT=$DL/Godot_v4.7-stable_linux.x86_64
 WORK=$REPO/build
 DIST=$REPO/dist
-PKGS="numpy pillow"
+PKGS="numpy pillow embreex"
 rm -rf "$WORK" && mkdir -p "$WORK" "$DIST"
 
 tools() {   # $1: destination; the tools, byte-compiled with the bundle's Python where it can run
