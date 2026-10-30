@@ -30,7 +30,16 @@ const BAKE_FIELDS := [
 	["bounces", "Bounces", 0.0, 4.0, 1.0, "How many times light bounces between surfaces. Needs a re-bake"],
 	["bounce", "Bounce strength", 0.0, 1.5, 0.05, "How much light surfaces pass on (x their colour). Needs a re-bake"],
 	["samples", "Quality (rays)", 8.0, 256.0, 8.0, "Sky rays per vertex: more is smoother and slower. Needs a re-bake"],
-	["detail", "Detail (+% vertices)", 0.0, 100.0, 5.0, "Splits triangles where the light changes sharply (shadow edges, doorways, wall feet), up to this many more vertices: sharper light, bigger stage model, slower bake. Needs a re-bake"]]
+	["detail", "Detail (+% vertices)", 0.0, 400.0, 5.0, "Puts vertices along the sun's shadow lines and splits triangles where the other light changes sharply (doorways, wall feet), up to this many more vertices: sharper light, bigger stage model, slower bake (the cost shows below). Needs a re-bake"]]
+# detail cost (lp2bake.py), measured on Battlegrounds: the built stage model is about STAGE_VERTEX_BYTES per vertex
+# (the preview has more vertices than the stage: count from the model's bytes) and each split vertex adds
+# DETAIL_VERTEX_BYTES (28 B + its triangles' 16-bit indices). The bake's RAM, from the preview bake (271k
+# vertices: 2.8 GB at +162k, 3.6 GB at +401k, 64 rays; the stage's bake needs less)
+const STAGE_VERTEX_BYTES := 39.0
+const DETAIL_VERTEX_BYTES := 33.0
+const BAKE_RAM_BASE := 1.4e9
+const BAKE_RAM_PER_RAY := 40.0   # bytes per vertex per sky ray, plus BAKE_RAM_VERTEX
+const BAKE_RAM_VERTEX := 600.0
 const NEUTRAL_CURVE := [[0.0, 0.333, 0.667, 1.0], [0.0, 0.333, 0.667, 1.0]]
 
 var main: Node
@@ -52,6 +61,8 @@ var light_popup: PopupPanel
 var bake_source: OptionButton
 var bake_rows := {}          # stage.light key -> SpinBox
 var bake_btn: Button
+var detail_info: Label
+var _unsplit := {}           # the unsplit preview's stats (geo_base.json once a detail bake split geo.json): {time, stats}
 var _updating := false
 
 func _init() -> void:
@@ -165,6 +176,11 @@ func setup(m: Node) -> void:
 		bk.add_child(main._label(f[1]))
 		bake_rows[f[0]] = _num(bk, f[2], f[3], f[4], f[5], _on_bake_changed)
 	v.add_child(bk)
+	detail_info = Label.new()
+	detail_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	detail_info.custom_minimum_size.x = 300
+	detail_info.visible = false
+	v.add_child(detail_info)
 	bake_btn = main._button(v, "Bake lighting", bake_now)
 	bake_btn.tooltip_text = "Ray trace the level's light (about half a minute; a minute or more with detail). Saves the project first"
 
@@ -300,10 +316,12 @@ func refresh() -> void:
 		if haze_pick.get_item_metadata(i) == sc.get("from", "01"):
 			haze_pick.select(i)
 	curve_ed.set_curves(curves_of(e))
+	grade_pick.select(_grade_index(curves_of(e)))
 	bake_source.select(1 if _bake("source") == "bake" else 0)
 	for k in bake_rows:
 		bake_rows[k].value = float(_bake(k))
 	_updating = false
+	main._stats_later()   # detail_info
 	_show_light()
 	apply_preview()
 
@@ -399,6 +417,27 @@ func apply_preset() -> void:
 	main.log_line("Lighting from %s's day." % MAP_NAMES.get(k, k))
 	refresh()
 
+func _grade_index(c: Dictionary) -> int:
+	# the grade item whose curves these are (0 Neutral), or -1 (edited by hand: none shown)
+	for i in grade_pick.item_count:
+		var k: String = grade_pick.get_item_metadata(i)
+		var g: Dictionary = curves_of({}) if k == "" else curves_of({"curves": presets[k]["curves"]})
+		if _same_curves(g, c):
+			return i
+	return -1
+
+static func _same_curves(a: Dictionary, b: Dictionary) -> bool:
+	for ch in ["R", "G", "B"]:
+		var pa: Array = a.get(ch, [[], []])
+		var pb: Array = b.get(ch, [[], []])
+		for j in 2:
+			if (pa[j] as Array).size() != (pb[j] as Array).size():
+				return false
+			for i in (pa[j] as Array).size():
+				if absf(float(pa[j][i]) - float(pb[j][i])) > 0.002:
+					return false
+	return true
+
 func apply_grade() -> void:
 	if grade_pick.selected < 0 or main.project_dir == "":
 		return
@@ -475,6 +514,58 @@ func _on_bake_changed() -> void:
 	for k in bake_rows:
 		b[k] = int(bake_rows[k].value) if k in ["bounces", "samples", "detail"] else bake_rows[k].value
 	preview_bake()
+	main._stats_later()   # the memory meter counts the detail (detail_estimate), and fills detail_info
+
+func _unsplit_stats() -> Dictionary:
+	var f: String = main.project_dir.path_join(".preview/geo_base.json")
+	if FileAccess.file_exists(f):
+		var t := FileAccess.get_modified_time(f)
+		if _unsplit.get("time", -1) != t:
+			var j: Variant = JSON.parse_string(FileAccess.get_file_as_string(f))
+			_unsplit = {"time": t, "stats": j["stats"] if j is Dictionary and j.get("stats") is Dictionary else {}}
+		return _unsplit["stats"]
+	return main.geometry.data.get("stats", {}) if main.geometry != null else {}
+
+func detail_estimate() -> Dictionary:
+	# what the detail setting will add when the stage is baked (lp2bake.py splits up to its vertices x detail %):
+	# {} with the LP1 lightmap or no detail; else vertices / added (the stage's, at most), bytes (stage model), ram (bake)
+	if main.project_dir == "" or _bake("source") != "bake" or float(_bake("detail")) <= 0:
+		return {}
+	var st := _unsplit_stats()
+	if st.is_empty():
+		return {}
+	var d := float(_bake("detail")) / 100.0
+	var pv := float(st.get("vertices", 0))
+	var v := float(st.get("model_bytes", 0)) / STAGE_VERTEX_BYTES
+	if v <= 0:
+		v = pv
+	return {"vertices": v, "added": v * d, "bytes": v * d * DETAIL_VERTEX_BYTES,
+		"ram": BAKE_RAM_BASE + pv * (1.0 + d) * (float(_bake("samples")) * BAKE_RAM_PER_RAY + BAKE_RAM_VERTEX)}
+
+func show_detail(model: float, total: float, target: float) -> void:
+	# main._update_stats: model / total (with textures) include the detail; target the stock map's model + textures
+	var e := detail_estimate()
+	detail_info.visible = not e.is_empty()
+	if e.is_empty():
+		return
+	var base_model: float = model - float(e["bytes"])
+	var phys := float(OS.get_memory_info().get("physical", 0))
+	var ram := float(e["ram"])
+	var lines := [
+		"Detail: up to +%dk stage vertices (%dk -> %dk); %d detail passes" % [int(e["added"] / 1000), int(e["vertices"] / 1000),
+			int((e["vertices"] + e["added"]) / 1000), 3 + int(float(_bake("detail")) / 50)],
+		"Stage model: %.1f -> %.1f MB (%.1fx the base geometry)" % [base_model / 1e6, model / 1e6, model / maxf(base_model, 1.0)],
+		"Map memory: %.1f of %.1f MB (%d%% of the stock map)" % [total / 1e6, target / 1e6, int(100 * total / maxf(target, 1.0))],
+		"Bake: about %.1f GB RAM%s" % [ram / 1e9, " of %.0f GB" % (phys / 1e9) if phys > 0 else ""]]
+	var warn := []
+	if target > 0 and total > target * 1.15:
+		warn.append("over the stock map's memory: the game may run short")
+	if phys > 0 and ram > phys * 0.7:
+		warn.append("the bake may run out of RAM")
+	if not warn.is_empty():
+		lines.append("Warning: " + "; ".join(warn))
+	detail_info.text = "\n".join(lines)
+	detail_info.modulate = Color(1.0, 0.45, 0.35) if not warn.is_empty() else Color(1, 1, 1, 0.8)
 
 func preview_bake() -> void:
 	# the live settings on the baked materials, as lp2bake.py combine()

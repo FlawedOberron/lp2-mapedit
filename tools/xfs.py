@@ -60,6 +60,9 @@ def parse(b, vec_offsets=None):
                     cls = b[pos[0]:b.index(b"\0", pos[0])].decode("latin-1"); pos[0] += len(cls) + 1
                     path = b[pos[0]:b.index(b"\0", pos[0])].decode("latin-1"); pos[0] += len(path) + 1
                     vals.append(None if cls == "null" else f"{cls}:{path}")
+                elif t == 0xE:   # string: NUL-terminated
+                    v = b[pos[0]:b.index(b"\0", pos[0])]; pos[0] += len(v) + 1
+                    vals.append(v.decode("latin-1"))
                 elif t in SCALAR:
                     vals.append(u(SCALAR[t])[0])
                 else:

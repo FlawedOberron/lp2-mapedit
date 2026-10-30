@@ -27,6 +27,7 @@ var image_dialog: FileDialog
 var _image_kind := ""
 var _pending := {}          # kind -> chosen image path (applied on Apply)
 var _thumbs := {}           # import key + build time -> texture
+var new_folder := ""          # the browser's folder for the next import (My assets)
 var _materials: Array = []  # [{name, bm, nm, mm, colour, size, users}]
 
 func _init() -> void:
@@ -52,6 +53,13 @@ func setup(m: Node, t: Node) -> void:
 	sc.add_child(v)
 
 	v.add_child(_heading("Imported meshes"))
+	var note: Label = main._label("Experimental (work in progress). From Blender: File > Export > glTF 2.0 (.glb) or Wavefront (.obj), "
+		+ "Y up, metres. A file is one mesh, its materials mapped below. Collision: an object named COL_<name> is the collision "
+		+ "for <name> (e.g. COL_Girder, a few boxes, for Girder) and is never drawn; objects without one collide with their own "
+		+ "triangles. Re-import after editing the file in Blender.")
+	note.autowrap_mode = TextServer.AUTOWRAP_WORD
+	note.modulate = Color(1, 0.85, 0.55)
+	v.add_child(note)
 	var row := HBoxContainer.new()
 	main._button(row, "Import file...", func(): file_dialog.popup_centered_ratio(0.6)).tooltip_text = "An OBJ or glTF (.glb / .gltf) file: Y up, metres (Blender's default export)"
 	main._button(row, "Place", place_selected).tooltip_text = "Place a copy where the view points (or double-click)"
@@ -78,7 +86,7 @@ func setup(m: Node, t: Node) -> void:
 	imp_collision = OptionButton.new()
 	for n in COLLISION_NAMES:
 		imp_collision.add_item(n)
-	imp_collision.tooltip_text = "Own mesh: its triangles. Box: its bounding box (cheap, for crates and blocks). None: walk and shoot through it"
+	imp_collision.tooltip_text = "Own mesh: its triangles (or its COL_ objects' where the file has them). Box: its bounding box (cheap, for crates and blocks). None: walk and shoot through it"
 	g.add_child(imp_collision)
 	g.add_child(main._label("Scale"))
 	imp_scale = main._spin(0.01, 100000.0, 0.01)
@@ -327,6 +335,10 @@ func import_file(path: String) -> void:
 	_tool(["import", "--game", main.game, _proj(), path, "--name", n,
 		"--collision", COLLISION[imp_collision.selected] if import_list.item_count else "mesh"], func():
 		main.log_line("Imported %s as %s. Double-click it (or Place) to put a copy in the level." % [path.get_file(), _slug(n)])
+		if new_folder != "":
+			main.browser._browser_data()["meshes"]["imp_" + _slug(n)] = new_folder
+			new_folder = ""
+			main.browser.refresh_prefabs()
 		for i in import_list.item_count:
 			if import_list.get_item_metadata(i) == "imp_" + _slug(n):
 				import_list.select(i))
@@ -378,6 +390,17 @@ func place_selected() -> void:
 	var k := _selected_key()
 	if k != "":
 		main.place_map_piece(k, 0)
+
+func select_key(key: String) -> void:
+	for i in import_list.item_count:
+		if import_list.get_item_metadata(i) == key:
+			import_list.select(i)
+			_show_import()
+
+func delete_key(key: String) -> void:
+	select_key(key)
+	if _selected_key() == key:
+		delete_selected()
 
 func delete_selected() -> void:
 	var a := _selected_import()

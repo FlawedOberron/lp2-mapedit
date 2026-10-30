@@ -2,6 +2,7 @@
 """LP2 map project: the editable form of a custom map (what the Map Editor saves), and the LP1 importer.
 
   lp2project.py import-lp1 sNNN.arc OUT_DIR --name "Area 921" [--tag T] [--size S] [--layout JSON] [--exclude TEXT] [--game LP2_DIR]
+  lp2project.py import-lp2 NN OUT_DIR --name "Kraftwerk edit" --game LP2_DIR --library LIB [--tag T] [--size S]
   lp2project.py check PROJECT_DIR
 
 A project is a folder: project.json + layout.json + assets/. lp2mapc.py compiles it to a Maps\\*.zip package.
@@ -11,10 +12,12 @@ project.json (format "lp2map", version 1):
   info         name, tag (8-character resource folder, unique per package), size (small / medium / large),
                thumbnail: null or {image, zoom, at: [x, y]}
   base         stock: the stock online map the package is built on (0 = Desecration: shaders, effects, sounds)
-  stage        lp1_models: LP1 stage models (lp2stage.py; textures beside them), light_scale (LP1 lightmap
+  stage        lp2_stage (an LP2 map's stage, converted by lp2stockmaps.py into the asset library, copied: its
+               online00.rModel + textures in lp2stage.py's output layout), lp2_map (its number), or
+               lp1_models: LP1 stage models (lp2stage.py; textures beside them), light_scale (LP1 lightmap
                -> vertex colour), light_balance (0..1, default 1: the baked light's colour cast removed, its
                average made grey), exclude: name parts left out
-  collision    lp1_move / lp1_bullet (LP1 atari / tama), lp1_physics (LP1 havok packfile),
+  collision    lp1_move / lp1_bullet (LP1 atari / tama), lp1_physics (LP1 havok packfile) or lp2_physics (an LP2 map's own rHkCollision),
                rebuild_physics (true: the physics follows edited pieces, new MOPP tree; lp2mopp.py)
   layout       layout.json (blender_lp2_map_markers.py / lp1points.py format: sets of points + objects per
                layout variant); lift: true puts markers onto the floor at compile time (LP1 markers sit low)
@@ -135,6 +138,56 @@ def import_lp1(arc, out, name, tag=None, size="large", layout=None, exclude=(), 
     return p
 
 
+SKY_MAPS = ("03", "06", "07", "10", "12", "15")   # stock maps with a sky model (the editor's lighting.gd)
+
+
+def import_lp2(num, out, name, game, library, tag=None, size="large"):
+    """One of LP2's online maps -> a project built like an LP1 port (on Desecration): its stage and collision from
+    the asset library (lp2stockmaps.py: the stage format, collision as SBC1), its own physics and its spawns,
+    VS, pickups and data posts (lp2layout.stock_layout). The stock lightmaps aren't kept: the light is baked."""
+    import lp2layout, lp2mapc, lp2sound
+    nn = "%02d" % int(num)
+    lib = os.path.join(library, "lp2", "map" + nn)
+    if not os.path.exists(os.path.join(lib, ".preview", "stage")):
+        raise SystemExit(f"{lib}: no converted stage: get the game assets in the editor first (Browser > Game assets)")
+    tag = tag or ("lp2o" + nn).ljust(8, "_")
+    if len(tag) != 8:
+        raise SystemExit("--tag must be 8 characters (it replaces 'online00')")
+    os.makedirs(out, exist_ok=True)
+    dst = os.path.join(out, "assets", "lp2")
+    shutil.rmtree(dst, ignore_errors=True)
+    shutil.copytree(os.path.join(lib, ".preview", "stage"), os.path.join(dst, "stage"))
+    for f in ("move.sbc1", "bullet.sbc1"):
+        shutil.copyfile(os.path.join(lib, "assets", f), os.path.join(dst, f))
+    native = os.path.join(game, "nativePC")
+    v = lp2mapc.entries(os.path.join(native, "arcXmlTmpPC", "variable", f"aArea_ONLINE_{nn}_v.arc"))
+    main_ = lp2mapc.entries(os.path.join(native, "arcXmlTmpPC", f"aArea_ONLINE_{nn}.arc"))
+    hav = (v.get("rHkCollision") or [None])[0]
+    if hav is None:
+        raise SystemExit(f"online {nn}: no physics (rHkCollision) in its _v archive")
+    open(os.path.join(dst, "physics.rHkCollision"), "wb").write(hav[1])
+    files = [(lp2mapc.base(n), cls, d) for E in (main_, v) for cls in ("rInitPosSet", "rObjSet") for n, d in E.get(cls, [])]
+    json.dump(lp2layout.stock_layout(files), open(os.path.join(out, "layout.json"), "w"), indent=1)
+    env = dict(ENVIRONMENT)
+    if nn in SKY_MAPS:
+        env["skybox"] = {"type": "stock", "map": nn}
+    presets = lp2sound.presets()
+    rv = next((k for k in (nn, nn + "_outside") if k in presets), None)
+    if rv:
+        env["sound"] = {"reverb": rv}
+    p = dict(format=FORMAT, version=VERSION,
+             info=dict(name=name, tag=tag, size=size, thumbnail=None),
+             base=dict(stock=0),
+             stage=dict(lp2_stage="assets/lp2/stage", lp2_map=nn, light=dict(source="bake")),
+             collision=dict(lp1_move="assets/lp2/move.sbc1", lp1_bullet="assets/lp2/bullet.sbc1",
+                            lp2_physics="assets/lp2/physics.rHkCollision"),
+             layout=dict(file="layout.json", lift=False, lp1_vs=False),
+             environment=env,
+             source=dict(lp2=nn))
+    save(out, p)
+    return p
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -143,12 +196,19 @@ def main():
     i.add_argument("--tag"); i.add_argument("--size", default="large", choices=("small", "medium", "large"))
     i.add_argument("--layout"); i.add_argument("--exclude", action="append", default=[])
     i.add_argument("--game", help="LP2 folder: convert the LP1 layout to an explicit LP2 one (lp2convert.py)")
+    l2 = sub.add_parser("import-lp2")
+    l2.add_argument("num"); l2.add_argument("out"); l2.add_argument("--name", required=True)
+    l2.add_argument("--game", required=True); l2.add_argument("--library", required=True)
+    l2.add_argument("--tag"); l2.add_argument("--size", default="large", choices=("small", "medium", "large"))
     c = sub.add_parser("check")
     c.add_argument("project")
     a = ap.parse_args()
     if a.cmd == "import-lp1":
         p = import_lp1(a.arc, a.out, a.name, a.tag, a.size, a.layout, a.exclude, a.game)
         print(f"{a.out}: project \"{p['info']['name']}\" ({len(p['stage']['lp1_models'])} stage models, tag {p['info']['tag']})")
+    elif a.cmd == "import-lp2":
+        p = import_lp2(a.num, a.out, a.name, a.game, a.library, a.tag, a.size)
+        print(f"{a.out}: project \"{p['info']['name']}\" (LP2 online {p['stage']['lp2_map']}, tag {p['info']['tag']})")
     else:
         bad = check(a.project)
         print("\n".join(bad) if bad else "ok")

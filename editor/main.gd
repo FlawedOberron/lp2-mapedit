@@ -7,6 +7,8 @@ extends Node
 # Command line (after --): --project DIR   open it on start
 #                           --screenshot PNG save a frame once the stage is shown, then quit (tests)
 #                           --place      (with --screenshot) place a VS mid-screen by a scripted click and drag
+#                           --place-volume  (with --screenshot) the same for a post-process volume, its floor dragged out
+#                           --preview-post  (with --place-volume) the camera inside it, the post-process preview on
 #                           --select N       select marker N; --piece N select piece N (--lift M: raise it M metres); --lit; --save
 
 const SETTINGS := "user://settings.cfg"
@@ -55,7 +57,14 @@ const DIG_PILES := ["Pile A (om8100: Pirate Fortress, Frozen Wasteland)", "Pile 
 # LP2 game types (lp2layout.py MODES: the game's layout file names); sets and markers list them in "modes"
 const GAME_TYPES := [["team", "Team Elimination"], ["slayer", "Elimination"], ["datapost", "Data Post"],
 	["fox", "Fugitive"], ["egg", "Akrid Egg"], ["counter", "Counter (name unknown)"], ["vs", "VS (name unknown)"]]
-const CATEGORIES := ["Spawns & game logic", "Pickups", "Vehicles", "Level geometry", "Lights"]
+# top bar view icons (white line art, drawn from SVG at run time: no imported files)
+const ICON_VOLUMES := '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" stroke="#e8e8e8" stroke-width="1.6" stroke-linejoin="round"><path d="M3 7l7-4 7 4v7l-7 4-7-4z"/><path d="M3 7l7 4 7-4M10 11v7" stroke-dasharray="2 1.6"/></svg>'
+const ICON_LIGHTS := '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" stroke="#e8e8e8" stroke-width="1.6" stroke-linecap="round"><path d="M10 2.5a5 5 0 0 0-3 9c.7.6 1 1.3 1 2.2h4c0-.9.3-1.6 1-2.2a5 5 0 0 0-3-9z"/><path d="M8 16h4M8.7 18.3h2.6"/></svg>'
+const ICON_ADD_LIGHT := '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" stroke="#e8e8e8" stroke-width="1.6" stroke-linecap="round"><path d="M9 3.5a4.5 4.5 0 0 0-2.7 8.1c.6.5.9 1.2.9 2h3.6c0-.8.3-1.5.9-2A4.5 4.5 0 0 0 9 3.5z"/><path d="M7.4 16.3h3.2"/><path d="M16 1.5v5M13.5 4h5" stroke="#9fe29f"/></svg>'
+const ICON_FOG := '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" stroke="#e8e8e8" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6c2-1.6 3.5-1.6 5 0s3 1.6 5 0 3.5-1.6 5 0M2.5 10.5c2-1.6 3.5-1.6 5 0s3 1.6 5 0 3.5-1.6 5 0M2.5 15c2-1.6 3.5-1.6 5 0s3 1.6 5 0 3.5-1.6 5 0"/></svg>'
+const ICON_POST := '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" stroke="#e8e8e8" stroke-width="1.6" stroke-linejoin="round"><rect x="2.5" y="5" width="12" height="10" rx="1.5"/><path d="M14.5 8.5l3.5-2v7l-3.5-2z"/><circle cx="8.5" cy="10" r="2.3" fill="#e8e8e8" fill-opacity="0.35"/></svg>'
+
+const CATEGORIES := ["Spawns & game logic", "Pickups", "Vehicles", "Level geometry", "Lights", "Volumes"]
 const LAYER_STAGE := 1
 const LAYER_MARKERS := 2
 const LAYER_COLLISION := 3   # View collision's triangles: clicking one selects the piece it belongs to
@@ -87,7 +96,12 @@ var lift_on_start := 0.0
 
 var selection: Array = []
 var drag_start: Array = []
+var face_press := {}   # a Ctrl+press on a volume face: a drag pushes / pulls it (volumes.gd), a click selects
 var screenshot_path := ""
+const Lpme := preload("res://lpme.gd")
+var project_file := ""     # the open .lpme (its workspace is project_dir); "" = a project folder (older)
+var packing := false        # a save's pack into the .lpme runs on a worker
+var pack_again := false
 var busy := false
 var job_queue: Array = []   # [script, args, done] waiting for the running job
 var undo_stack: Array = []
@@ -145,6 +159,14 @@ var kill_on: CheckBox
 var kill_height: SpinBox
 var kill_plane: MeshInstance3D
 var physics_on: CheckBox
+var thumb_preview: TextureRect  # Map info: the create-match picture (project info.thumbnail), in its menu circle
+var thumb_zoom: SpinBox
+var thumb_dialog: FileDialog
+var lowgrav_on: CheckBox        # Map info: environment jump_packs / underwater / gravity (xlive gravity.cpp)
+var underwater_on: CheckBox
+var gravity_spin: SpinBox
+var volumes: Node               # volumes.gd: kill / gravity / post-process boxes
+var vrow_add: HBoxContainer     # Map info row the Add volume menu goes in
 var pickup_row: Control   # explicit weapon pickup
 var pickup_pick: OptionButton
 var tier_row: Control     # VS tier
@@ -156,7 +178,10 @@ var dig_count: SpinBox
 var dig_pile: OptionButton
 var baked_toggle: CheckButton
 var wire_toggle: CheckButton
+var drag_sizes: Array = []   # volumes' sizes when a gizmo drag began
+var view_toggles := {}   # top bar icons: "volumes", "lights", "fog", "post" (remembered in settings)
 var wire_on_start := false   # --wireframe (tests)
+var thumb_on_start := false  # --capture-thumbnail (tests): the view's thumbnail once the map is framed
 var col_toggle: CheckButton
 var info_win: Window
 var col_mesh: MeshInstance3D   # View collision: the movement collision, green see-through
@@ -173,6 +198,9 @@ var perf_panel: PanelContainer
 var perf_grid: GridContainer
 var updating_ui := false
 var updates: Node
+var quit_dialog: ConfirmationDialog
+var saved_state := ""   # _saved_state() at the last save / open
+var opening := false     # a project just opened: its state counts as saved once its geometry has loaded
 
 func _notification(what: int) -> void:
 	# low-processor mode (project.godot) already redraws only on changes; in the background, cap it lower still
@@ -180,8 +208,58 @@ func _notification(what: int) -> void:
 		Engine.max_fps = 10
 	elif what == NOTIFICATION_APPLICATION_FOCUS_IN:
 		Engine.max_fps = 0
+	elif what == NOTIFICATION_WM_CLOSE_REQUEST:
+		if project_dir != "" and screenshot_path == "" and _saved_state() != saved_state:
+			quit_dialog.popup_centered()
+		else:
+			get_tree().quit()
+
+func _svg_icon(svg: String) -> Texture2D:
+	var img := Image.new()
+	img.load_svg_from_string(svg, DisplayServer.screen_get_scale() if OS.get_name() == "macOS" else 1.0)
+	return ImageTexture.create_from_image(img)
+
+func _on_view_toggle(on: bool, what: String) -> void:
+	cfg.set_value("view", what, on)
+	cfg.save(SETTINGS)
+	match what:
+		"fog":
+			fog_win.apply_preview()
+		"post":
+			volumes.preview_post_off()
+		_:
+			apply_marker_visibility()
+
+func view_on(what: String) -> bool:
+	return view_toggles[what].button_pressed if view_toggles.has(what) else true
+
+func apply_marker_visibility() -> void:
+	# the view toggles: volumes / light nodes hidden (still in the outliner); a hidden one can't stay selected
+	var hidden: Array = []
+	for n in markers_root.get_children():
+		var show := not (n.has_meta("volume") and not view_on("volumes") or n.has_meta("light") and not view_on("lights"))
+		n.visible = show
+		if not show and selection.has(n):
+			hidden.append(n)
+	if not hidden.is_empty():
+		select(selection.filter(func(m): return not hidden.has(m)))
+
+func _saved_state() -> String:
+	# what Save writes; unsaved changes = it differs from the last save / open
+	if project.is_empty():
+		return ""
+	return JSON.stringify(project) + JSON.stringify(layout) + (JSON.stringify(geometry.to_json()) if geometry.get_child_count() else "")
 
 func _ready() -> void:
+	get_tree().auto_accept_quit = false
+	quit_dialog = ConfirmationDialog.new()
+	quit_dialog.title = "Unsaved changes"
+	quit_dialog.dialog_text = "Save the map's changes before closing?"
+	quit_dialog.ok_button_text = "Save and close"
+	quit_dialog.add_button("Close without saving", true, "discard")
+	quit_dialog.confirmed.connect(func(): save_project(); get_tree().quit())
+	quit_dialog.custom_action.connect(func(_a): get_tree().quit())
+	add_child(quit_dialog)
 	RenderingServer.set_debug_generate_wireframes(true)   # before any mesh exists: the Wireframe toggle needs them
 	cfg.load(SETTINGS)
 	var bundle := bundle_dir()
@@ -212,7 +290,7 @@ func _ready() -> void:
 		args = OS.get_cmdline_args()
 	for i in args.size():
 		if args[i] == "--project" and i + 1 < args.size():
-			call_deferred("open_project", args[i + 1])
+			call_deferred("open_map_file" if args[i + 1].get_extension().to_lower() == "lpme" else "open_project", args[i + 1])
 		elif args[i] == "--screenshot" and i + 1 < args.size():
 			screenshot_path = args[i + 1]
 			OS.low_processor_usage_mode = false   # it waits on frames; idle redraw-on-change would never draw one
@@ -234,6 +312,8 @@ func _ready() -> void:
 			browser_tab = int(args[i + 1])
 		elif args[i] == "--browser-group" and i + 1 < args.size():
 			browser_group = args[i + 1]
+		elif args[i] == "--capture-thumbnail":
+			thumb_on_start = true
 		elif args[i] == "--info":
 			call_deferred("toggle_info")
 		elif args[i] == "--collision":
@@ -250,10 +330,12 @@ func _ready() -> void:
 		settings_win.call_deferred("open", true)
 	elif project_dir == "" and not args.has("--project"):
 		var last: String = cfg.get_value("recent", "project", "")
-		if last != "" and DirAccess.dir_exists_absolute(last):
+		if last.get_extension().to_lower() == "lpme" and FileAccess.file_exists(last):
+			call_deferred("open_map_file", last)
+		elif last != "" and DirAccess.dir_exists_absolute(last):
 			call_deferred("open_project", last)
 	log_line("LP2 Map Editor. Right mouse: look (WASD, Q E / Ctrl Space down up, Shift fast, wheel speed). Left click: select (Shift / Ctrl: add). " +
-		"W / E / R: move / rotate / scale with the gizmo (Ctrl while dragging: snap). F: frame. End: drop to floor. " +
+		"W / E / R: move / rotate / scale with the gizmo (Ctrl while dragging: snap). F: frame. End: drop to floor. Ctrl+drag a volume face: push / pull it (Shift: snap); Ctrl+Shift+drag: a new box out of it; Ctrl+Shift+right click: delete that box. " +
 		"Ctrl+D duplicate, Ctrl+G group, Ctrl+Shift+G ungroup, Delete, Ctrl+Z / Ctrl+Y undo / redo.")
 
 # ---------------------------------------------------------------- world
@@ -324,19 +406,18 @@ func _build_ui() -> void:
 	var bars := VBoxContainer.new()
 	root.add_child(_panel(bars))
 	var bar := _scroll_row(bars)
-	_button(bar, "New...", func(): new_win.open()).tooltip_text = "A new map project from one of Lost Planet 1's maps"
+	_button(bar, "Import map from LP/LP2...", func(): new_win.open()).tooltip_text = "A new map from one of Lost Planet 1's or Lost Planet 2's maps"
 	_button(bar, "Open...", _on_open)
 	_button(bar, "Save", save_project)
 	_button(bar, "Save as...", _on_save_as)
 	_button(bar, "Install to game", install_package).tooltip_text = "Save, export, and copy the package to the game's Maps folder"
 	bar.add_child(VSeparator.new())
 	_button(bar, "Browser (B)", toggle_browser).tooltip_text = "Floating window of prefabs and the level's pieces, with thumbnails"
-	_button(bar, "Mesh builder (M)", toggle_mesh_builder).tooltip_text = "Import OBJ / glTF meshes as placeable pieces, and make materials for them"
 	_button(bar, "Preview (P)", toggle_preview).tooltip_text = "Walk the map: a soldier-sized character with the game's camera (Esc back)"
 	_button(bar, "Lighting (L)", toggle_lighting).tooltip_text = "The sun, sky light, sky dome and placed point / spot lights"
 	_button(bar, "Map info (I)", toggle_info).tooltip_text = "Name, size, water and kill floor heights, physics rebuild"
 	_button(bar, "Fog & weather (H)", toggle_fog).tooltip_text = "Distance fog, low-lying height fog, rain / snow / ash and no-weather boxes"
-	_button(bar, "Place (T)", toggle_placer).tooltip_text = "Place spawn points, weapons and VS: click the map to put one down, drag to aim it"
+	_button(bar, "Place (T)", toggle_placer).tooltip_text = "Place spawn points, weapons, VS and volumes: click the map to put one down, drag to aim it (volumes: drag out the floor)"
 	_button(bar, "Settings", toggle_settings).tooltip_text = "The game folders and the asset library folder"
 	status = _label("No project open")
 	status.size_flags_horizontal = Control.SIZE_EXPAND_FILL
@@ -401,6 +482,31 @@ func _build_ui() -> void:
 	wire_toggle.tooltip_text = "Draw the view as wireframe, with the triangles in view counted (density, detail baking)"
 	wire_toggle.toggled.connect(_on_wireframe)
 	bar.add_child(wire_toggle)
+	bar.add_child(VSeparator.new())
+	for t in [["volumes", ICON_VOLUMES, "Show volumes (kill, gravity, post-process, no-weather boxes)", true],
+			["lights", ICON_LIGHTS, "Show light nodes", true],
+			["fog", ICON_FOG, "Fog in the view (the Fog & weather window's distance and ground fog)", true],
+			["post", ICON_POST, "Post-process in the view: the colour grade of the volume the camera is in", false]]:
+		var b := Button.new()
+		b.icon = _svg_icon(t[1])
+		b.toggle_mode = true
+		b.button_pressed = cfg.get_value("view", t[0], t[3])
+		b.tooltip_text = t[2]
+		b.toggled.connect(_on_view_toggle.bind(t[0]))
+		bar.add_child(b)
+		view_toggles[t[0]] = b
+		if t[0] == "lights":   # quick add: a point or spot light where the view points
+			var add := MenuButton.new()
+			add.icon = _svg_icon(ICON_ADD_LIGHT)
+			add.flat = false
+			add.tooltip_text = "Add a light where the view points (set it up in Lighting, L)"
+			add.get_popup().add_item("Point light", 0)
+			add.get_popup().add_item("Spot light", 1)
+			add.get_popup().id_pressed.connect(func(i):
+				view_toggles["lights"].button_pressed = true   # a new light hidden by the toggle would look like nothing happened
+				lighting.add_light("spot" if i == 1 else "point"))
+			bar.add_child(add)
+	bar.add_child(VSeparator.new())
 	_button(bar, "Rebuild preview", func(): build_preview(true))
 	if wire_on_start:
 		wire_toggle.button_pressed = true
@@ -536,7 +642,7 @@ func _build_ui() -> void:
 	# Map info: a floating window (I), like the other tools
 	info_win = Window.new()
 	info_win.title = "Map info"
-	info_win.size = Vector2i(340, 230)
+	info_win.size = Vector2i(360, 440)
 	info_win.transient = true
 	info_win.visible = false
 	info_win.wrap_controls = true
@@ -556,6 +662,48 @@ func _build_ui() -> void:
 		info_size.add_item(s)
 	info_size.item_selected.connect(func(i): if project: project["info"]["size"] = info_size.get_item_text(i))
 	iv.add_child(info_size)
+	var thumb_row := HBoxContainer.new()
+	thumb_preview = TextureRect.new()
+	thumb_preview.custom_minimum_size = Vector2(96, 96)
+	thumb_preview.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	thumb_preview.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	var circle := ShaderMaterial.new()
+	circle.shader = Shader.new()
+	circle.shader.code = """shader_type canvas_item;
+uniform float zoom = 1.0;
+void fragment() {
+	vec2 d = UV - 0.5;
+	COLOR = length(d) > 0.5 * 401.0 / 512.0 ? vec4(0.0) : texture(TEXTURE, 0.5 + d / zoom);
+}"""
+	thumb_preview.material = circle
+	thumb_row.add_child(thumb_preview)
+	var tcol := VBoxContainer.new()
+	tcol.add_child(_label("Thumbnail (create match)"))
+	var tb := HBoxContainer.new()
+	_button(tb, "Capture view", capture_thumbnail).tooltip_text = "The 3D view as it is now becomes the map's picture in Create Match (a circle cut from the middle)"
+	_button(tb, "Image...", func(): thumb_dialog.popup_centered_ratio(0.6)).tooltip_text = "Use a picture file (png / jpg)"
+	_button(tb, "Clear", func(): _set_thumbnail(null))
+	tcol.add_child(tb)
+	var zr := HBoxContainer.new()
+	zr.add_child(_label("Zoom"))
+	thumb_zoom = _spin(1.0, 4.0, 0.05)
+	thumb_zoom.tooltip_text = "How close the circle crops in (1 = the picture's full height)"
+	thumb_zoom.value_changed.connect(func(v):
+		if not updating_ui and project and project["info"].get("thumbnail") is Dictionary:
+			project["info"]["thumbnail"]["zoom"] = v
+			_show_thumbnail())
+	zr.add_child(thumb_zoom)
+	tcol.add_child(zr)
+	thumb_row.add_child(tcol)
+	iv.add_child(thumb_row)
+	thumb_dialog = FileDialog.new()
+	thumb_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	thumb_dialog.access = FileDialog.ACCESS_FILESYSTEM
+	thumb_dialog.filters = PackedStringArray(["*.png, *.jpg, *.jpeg, *.webp ; Pictures"])
+	thumb_dialog.title = "Map thumbnail picture"
+	thumb_dialog.use_native_dialog = true
+	thumb_dialog.file_selected.connect(_thumbnail_from_file)
+	add_child(thumb_dialog)
 	var wrow := HBoxContainer.new()
 	water_on = CheckBox.new()
 	water_on.text = "Water at (cm)"
@@ -575,6 +723,26 @@ func _build_ui() -> void:
 	kill_height.value_changed.connect(func(_v): _on_kill())
 	krow.add_child(kill_height)
 	iv.add_child(krow)
+	lowgrav_on = CheckBox.new()
+	lowgrav_on.text = "Give players jump packs"
+	lowgrav_on.tooltip_text = "NEOS's air boost: a short dash while airborne. Gravity stays the map's (Gravity x; NEOS is about 0.3). Needs the xlive mod"
+	lowgrav_on.toggled.connect(func(_b): _on_gravity())
+	iv.add_child(lowgrav_on)
+	underwater_on = CheckBox.new()
+	underwater_on.text = "Lighter under water"
+	underwater_on.tooltip_text = "Players below the water level get lighter, as on the stock maps with water (needs Water set). Needs the xlive mod"
+	underwater_on.toggled.connect(func(_b): _on_gravity())
+	iv.add_child(underwater_on)
+	var grow := HBoxContainer.new()
+	grow.add_child(_label("Gravity x"))
+	gravity_spin = _spin(0.01, 10.0, 0.01)
+	gravity_spin.tooltip_text = "Multiplies gravity for players and physics objects (debris, ragdolls) on the whole map; 1 = normal. Gravity volumes multiply on top. Needs the xlive mod"
+	gravity_spin.value_changed.connect(func(_v): _on_gravity())
+	grow.add_child(gravity_spin)
+	iv.add_child(grow)
+	var vrow := HBoxContainer.new()
+	vrow_add = vrow
+	iv.add_child(vrow)
 	physics_on = CheckBox.new()
 	physics_on.text = "Rebuild physics on export"
 	physics_on.tooltip_text = "Grenades, debris and ragdolls follow moved, hidden and placed pieces (a new physics tree is built; slower export). Off: physics keeps the map's original shape"
@@ -616,17 +784,19 @@ func _build_ui() -> void:
 	root.add_child(_panel(bottom))
 
 	open_dialog = FileDialog.new()
-	open_dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	open_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	open_dialog.access = FileDialog.ACCESS_FILESYSTEM
-	open_dialog.title = "Open a map project folder (with project.json)"
-	open_dialog.dir_selected.connect(open_project)
+	open_dialog.title = "Open a map"
+	open_dialog.filters = PackedStringArray(["*.lpme ; LP2 map", "project.json ; Older map project folder"])
+	open_dialog.file_selected.connect(_on_open_file)
 	open_dialog.use_native_dialog = true
 	add_child(open_dialog)
 	save_as_dialog = FileDialog.new()
-	save_as_dialog.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	save_as_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
 	save_as_dialog.access = FileDialog.ACCESS_FILESYSTEM
-	save_as_dialog.title = "Save the map as a new project folder (pick or create an empty folder)"
-	save_as_dialog.dir_selected.connect(save_project_as)
+	save_as_dialog.title = "Save the map as"
+	save_as_dialog.filters = PackedStringArray(["*.lpme ; LP2 map"])
+	save_as_dialog.file_selected.connect(save_project_as)
 	save_as_dialog.use_native_dialog = true
 	add_child(save_as_dialog)
 	thumbs = Node.new()
@@ -645,6 +815,11 @@ func _build_ui() -> void:
 	lighting.set_script(load("res://lighting.gd"))
 	add_child(lighting)
 	lighting.setup(self)
+	volumes = Node.new()
+	volumes.set_script(load("res://volumes.gd"))
+	add_child(volumes)
+	volumes.setup(self, type_box.get_parent())
+	volumes.add_menu(vrow_add)
 	settings_win = Window.new()
 	settings_win.set_script(load("res://settings.gd"))
 	add_child(settings_win)
@@ -666,6 +841,9 @@ func _build_ui() -> void:
 	placer.set_script(load("res://place.gd"))
 	add_child(placer)
 	placer.setup(self)
+	# Place is its own OS window: while it's open, the view takes the focus back as soon as the mouse is over it, so
+	# the first click there places instead of only focusing the editor
+	get_window().mouse_entered.connect(func(): if placer.visible and not get_window().has_focus(): get_window().grab_focus())
 	for w: Window in [info_win, browser, mesh_builder, lighting, settings_win, new_win, fog_win, placer]:
 		w.window_input.connect(_on_tool_window_input.bind(w))   # Ctrl+S saves from any of them too
 	lighting_dialog = FileDialog.new()
@@ -733,6 +911,144 @@ func _spin(lo: float, hi: float, step: float) -> SpinBox:
 	s.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	return s
 
+func _send_mouse(at: Vector2, pressed: Variant, ctrl := false, shift := false) -> void:
+	# pressed: true / false = a left button press / release, null = a move (button held)
+	var ev: InputEventMouse
+	if pressed == null:
+		ev = InputEventMouseMotion.new()
+		ev.button_mask = MOUSE_BUTTON_MASK_LEFT
+	else:
+		ev = InputEventMouseButton.new()
+		ev.button_index = MOUSE_BUTTON_LEFT
+		ev.pressed = pressed
+	ev.position = at
+	ev.global_position = at
+	ev.ctrl_pressed = ctrl
+	ev.shift_pressed = shift
+	Input.parse_input_event(ev)
+	await get_tree().process_frame
+
+func _input_test() -> void:
+	var vols := func() -> int: return markers_root.get_children().filter(func(n): return n.has_meta("volume")).size()
+	var mid := get_viewport().get_visible_rect().size / 2
+	placer.popup()
+	placer.kind_pick.select(3)
+	placer._fill_items()
+	placer.item_pick.select(0)
+	await get_tree().create_timer(0.5).timeout
+	var n0: int = vols.call()
+	await _send_mouse(mid, true)
+	for k in 5:
+		await _send_mouse(mid + Vector2(40, 30) * (k + 1), null)
+	await _send_mouse(mid + Vector2(200, 150), false)
+	var v: Node3D = selection[0] if selection.size() == 1 and selection[0].has_meta("volume") else null
+	print("input-test: drag-place: volumes ", n0, " -> ", vols.call(), ", size ", v.get_meta("data")["size"] if v else "none")
+	if v == null:
+		return
+	set_tool(0)
+	var g := camera.unproject_position(gizmo.global_position)
+	var before: Vector3 = v.global_position
+	await _send_mouse(g, true)
+	var grabbed: bool = gizmo.dragging()
+	for k in 4:
+		await _send_mouse(g + Vector2(15, 0) * (k + 1), null)
+	await _send_mouse(g + Vector2(60, 0), false)
+	print("input-test: gizmo over Place: grabbed ", grabbed, ", moved ", (v.global_position - before).length() > 0.01, ", volumes ", vols.call())
+	set_tool(2)
+	await get_tree().process_frame
+	var size0: Array = (v.get_meta("data")["size"] as Array).duplicate()
+	var x_tip := camera.unproject_position(gizmo.global_position + Vector3.RIGHT * gizmo._size() * 0.9)
+	await _send_mouse(x_tip, true)
+	grabbed = gizmo.dragging()
+	for k in 4:
+		await _send_mouse(x_tip + (x_tip - g).normalized() * 20.0 * (k + 1), null)
+	await _send_mouse(x_tip + (x_tip - g).normalized() * 80.0, false)
+	print("input-test: scale X: grabbed ", grabbed, ", size ", size0, " -> ", v.get_meta("data")["size"], ", volumes ", vols.call())
+	set_tool(1)
+	await get_tree().process_frame
+	print("input-test: rotate rings shown for a volume: ", gizmo._parts.filter(func(p): return p.visible).size())
+	set_tool(0)
+	var vs: Array = v.get_meta("data")["size"]   # a point on the top face away from the gizmo's arrows
+	var top := camera.unproject_position(v.global_position + Vector3(float(vs[0]) * 0.3, float(vs[1]), float(vs[2]) * 0.3) * CM)
+	var hit: Dictionary = volumes.face_hit(top)
+	await _send_mouse(top, true, true)
+	var pressed_face := not face_press.is_empty()
+	for k in 3:
+		await _send_mouse(top + Vector2(0, -15) * (k + 1), null, true)
+	await _send_mouse(top + Vector2(0, -45), false, true)
+	print("input-test: Ctrl+face over Place: face ", hit.get("axis", -1), ", pressed ", pressed_face, ", size ", v.get_meta("data")["size"], ", volumes ", vols.call())
+	placer.hide()
+	select([v])
+	set_tool(1)
+	await get_tree().process_frame
+	var go := gizmo.global_position
+	var gs: float = gizmo._size()
+	var r0 := camera.unproject_position(go + Vector3.BACK * gs)
+	var rings: int = gizmo._parts.filter(func(p): return p.visible).size()
+	var grab: int = gizmo.hit(r0)
+	await _send_mouse(r0, true)
+	for k in range(1, 6):
+		var ang := deg_to_rad(9.0 * k)
+		await _send_mouse(camera.unproject_position(go + (Vector3.BACK * cos(ang) + Vector3.RIGHT * sin(ang)) * gs), null)
+	await _send_mouse(camera.unproject_position(go + (Vector3.BACK * cos(PI / 4) + Vector3.RIGHT * sin(PI / 4)) * gs), false)
+	var vd: Dictionary = v.get_meta("data")
+	var vsz: Array = vd["size"]
+	# a point just inside the turned box's +x end, which the unturned box wouldn't hold
+	var edge: Vector3 = v.global_transform * (Vector3(float(vsz[0]) * 0.49, float(vsz[1]) * 0.5, 0.0) * CM)
+	print("input-test: volume rotate: rings ", rings, ", grabbed ring ", grab, ", yaw ", vd.get("yaw"), ", inside at the turned end ",
+		volumes.contains(v, edge), ", outside past it ", volumes.contains(v, v.global_transform * (Vector3(float(vsz[0]) * 0.52, float(vsz[1]) * 0.5, 0.0) * CM)))
+	set_tool(0)
+	# Ctrl+Shift+drag the turned box's +x end face: a new box grows out of it
+	var face_at: Vector3 = v.global_transform * (Vector3(float(vsz[0]) * 0.5, float(vsz[1]) * 0.5, float(vsz[2]) * 0.25) * CM)
+	camera.global_position = face_at + (v.global_transform.basis.x * 12.0 + Vector3(0, 4, 0)) + v.global_transform.basis.z * 6.0
+	camera.look_at(face_at)
+	await get_tree().process_frame
+	var fp := camera.unproject_position(face_at)
+	var fh: Dictionary = volumes.face_hit(fp)
+	var out_dir := camera.unproject_position(face_at + v.global_transform.basis.x * 1.0) - fp
+	await _send_mouse(fp, true, true, true)
+	for k in range(1, 6):
+		await _send_mouse(fp + out_dir.normalized() * 20.0 * k, null, true, true)
+	await _send_mouse(fp + out_dir.normalized() * 100.0, false, true, true)
+	var past: Vector3 = v.global_transform * (Vector3(float(vsz[0]) * 0.5 + 50.0, float(vsz[1]) * 0.5, float(vsz[2]) * 0.25) * CM)
+	print("input-test: extrude: face box ", fh.get("box", -1), " axis ", fh.get("axis", -1), ", boxes ", vd.get("boxes", []),
+		", main size ", vd["size"], ", inside past the old end ", volumes.contains(v, past))
+	select([v])
+	await get_tree().process_frame
+	await get_tree().process_frame
+	get_viewport().get_texture().get_image().save_png(screenshot_path.get_basename() + "-extrude.png")
+	# Ctrl+Shift+right click on the main box: it goes, the extruded box becomes the volume
+	var box_mid: Vector3 = v.global_transform * (Vector3(0, float(vsz[1]) * 0.5, 0) * CM)
+	camera.global_position = box_mid + Vector3(0, 25, 0.5)
+	camera.look_at(box_mid)
+	await get_tree().process_frame
+	var rp := camera.unproject_position(box_mid + Vector3(0, float(vsz[1]) * 0.5 * CM, 0))
+	var hb: int = volumes.face_hit(rp).get("box", -1)
+	for down in [true, false]:
+		var rb := InputEventMouseButton.new()
+		rb.button_index = MOUSE_BUTTON_RIGHT
+		rb.pressed = down
+		rb.position = rp
+		rb.global_position = rp
+		rb.ctrl_pressed = true
+		rb.shift_pressed = true
+		Input.parse_input_event(rb)
+		await get_tree().process_frame
+	print("input-test: delete box: clicked box ", hb, ", boxes left ", vd.get("boxes", []).size(), ", size ", vd["size"],
+		", old centre inside ", volumes.contains(v, box_mid), ", extruded part inside ", volumes.contains(v, past), ", looking ", camera.is_looking())
+	var mk: Array = markers_root.get_children().filter(func(n): return _is_marker(n) and not n.has_meta("volume"))
+	if not mk.is_empty():
+		var m: Node3D = mk[0]
+		camera.global_position = m.global_position + Vector3(0, 6, 8)
+		camera.look_at(m.global_position)
+		select([m])
+		set_tool(1)
+		await get_tree().process_frame
+		await get_tree().process_frame
+		var ring := camera.unproject_position(gizmo.global_position + Vector3(0, 0, 1) * gizmo._size())
+		print("input-test: marker rotate: gizmo visible ", gizmo.visible, ", rings ", gizmo._parts.filter(func(p): return p.visible).size(),
+			", parts ", gizmo._parts.size(), ", hit on ring ", gizmo.hit(ring), ", gizmo at ", gizmo.global_position, " marker at ", m.global_position)
+
 func log_line(t: String) -> void:
 	log_box.text += t + "\n"
 	log_box.scroll_vertical = log_box.get_line_count()
@@ -750,6 +1066,50 @@ func set_tool(m: int) -> void:
 
 func _on_open() -> void:
 	open_dialog.popup_centered_ratio(0.6)
+
+func _on_open_file(path: String) -> void:
+	if path.get_extension().to_lower() == "lpme":
+		open_map_file(path)
+	else:
+		open_project(path.get_base_dir())
+
+func open_map_file(path: String) -> void:
+	# a .lpme: unpacked into its workspace (Lpme), which is then the open project
+	var ws: String = Lpme.unpack(path)
+	if ws == "":
+		log_line("Not an LP2 map file (or it can't be read): " + path)
+		return
+	open_project(ws)
+	if project_dir != ws:
+		return
+	project_file = path
+	if screenshot_path == "":
+		cfg.set_value("recent", "project", path)
+		cfg.save(SETTINGS)
+	DisplayServer.window_set_title("LP2 Map Editor - %s" % path.get_file())
+
+func _pack() -> void:
+	# the workspace into the .lpme, off the main thread; a save during a pack packs again after it
+	if project_file == "":
+		return
+	if packing:
+		pack_again = true
+		return
+	packing = true
+	var ws := project_dir
+	var file := project_file
+	WorkerThreadPool.add_task(func(): call_deferred("_packed", Lpme.pack(ws, file), file))
+
+func _packed(err: Error, file: String) -> void:
+	packing = false
+	if err != OK:
+		log_line("SAVE FAILED: can't write %s (%s)" % [file, error_string(err)])
+		set_status("Save failed")
+	elif pack_again:
+		pack_again = false
+		_pack()
+	else:
+		set_status("Saved " + file.get_file())
 
 # ---------------------------------------------------------------- paths and settings
 
@@ -807,11 +1167,32 @@ func set_paths(g: String, lp1: String, lib: String) -> void:
 	if first and library.load_index(library_dir) == 0:
 		get_assets()
 
-func import_lp1_map(arc: String, out: String, name: String) -> void:
-	DirAccess.make_dir_recursive_absolute(out)
+func import_lp1_map(arc: String, file: String, name: String) -> void:
+	# a new .lpme from an LP1 map: imported into the file's workspace, packed, opened
+	var ws: String = Lpme.workspace(file)
+	DirAccess.make_dir_recursive_absolute(ws)
+	Lpme.clear(ws, false)
+	DirAccess.make_dir_recursive_absolute(file.get_base_dir())
 	set_status("Importing %s..." % arc.get_file())
-	log_line("New map: %s -> %s" % [arc, out])
-	run_tool("lp2project.py", ["import-lp1", arc, out, "--name", name, "--game", game], func(): open_project(out))
+	log_line("New map: %s -> %s" % [arc, file])
+	run_tool("lp2project.py", ["import-lp1", arc, ws, "--name", name, "--game", game], func(): _imported(ws, file))
+
+func import_lp2_map(stock: int, file: String, name: String) -> void:
+	# a new .lpme from one of LP2's online maps: its own stage, collision and layout (lp2project.py import-lp2)
+	var ws: String = Lpme.workspace(file)
+	DirAccess.make_dir_recursive_absolute(ws)
+	Lpme.clear(ws, false)
+	DirAccess.make_dir_recursive_absolute(file.get_base_dir())
+	set_status("Importing online map %02d..." % stock)
+	log_line("New map: Lost Planet 2 online %02d -> %s" % [stock, file])
+	run_tool("lp2project.py", ["import-lp2", str(stock), ws, "--name", name, "--game", game, "--library", library_dir], func(): _imported(ws, file))
+
+func _imported(ws: String, file: String) -> void:
+	var err: Error = Lpme.pack(ws, file)
+	if err != OK:
+		log_line("Import: can't write %s (%s)" % [file, error_string(err)])
+		return
+	open_map_file(file)
 
 func _read_json(path: String) -> Variant:
 	var f := FileAccess.open(path, FileAccess.READ)
@@ -841,6 +1222,7 @@ func open_project(dir: String) -> void:
 		log_line("Not a map project (no lp2map project.json): " + dir)
 		return
 	project_dir = dir
+	project_file = ""
 	project = _ints(p)
 	library.load_imports(dir)
 	var lay: Variant = _read_json(dir.path_join(project["layout"]["file"]))
@@ -850,6 +1232,7 @@ func open_project(dir: String) -> void:
 		cfg.save(SETTINGS)
 	updating_ui = true
 	info_name.text = project["info"].get("name", "")
+	_show_thumbnail()
 	for i in info_size.item_count:
 		if info_size.get_item_text(i) == project["info"].get("size", "large"):
 			info_size.select(i)
@@ -859,6 +1242,13 @@ func open_project(dir: String) -> void:
 	kill_on.button_pressed = env.get("kill_floor") != null
 	kill_height.value = float(env.get("kill_floor")) if env.get("kill_floor") != null else -5000.0
 	physics_on.button_pressed = project.get("collision", {}).get("rebuild_physics", false)
+	if env.get("low_gravity", false):   # older projects: NEOS's low gravity = jump packs + gravity x0.3
+		env["jump_packs"] = true
+		env["gravity"] = snappedf(float(env.get("gravity", 1.0)) * 0.3, 0.001)
+		env.erase("low_gravity")
+	lowgrav_on.button_pressed = env.get("jump_packs", false)
+	underwater_on.button_pressed = env.get("underwater", false)
+	gravity_spin.value = float(env.get("gravity", 1.0))
 	updating_ui = false
 	_show_kill()
 	lighting.presets = {}
@@ -873,6 +1263,8 @@ func open_project(dir: String) -> void:
 	undo_stack = []
 	redo_stack = []
 	set_variant(0)
+	saved_state = _saved_state()
+	opening = true
 	build_preview(false)
 	if mesh_builder.visible:
 		mesh_builder.refresh()
@@ -893,19 +1285,27 @@ func save_project() -> void:
 		var g := FileAccess.open(geometry_path(), FileAccess.WRITE)
 		g.store_string(JSON.stringify(geometry.to_json(), " "))
 		g.close()
-	var f := FileAccess.open(project_dir.path_join("project.json"), FileAccess.WRITE)
-	f.store_string(JSON.stringify(project, " "))
-	f.close()
-	f = FileAccess.open(project_dir.path_join(project["layout"]["file"]), FileAccess.WRITE)
-	f.store_string(JSON.stringify(layout, " "))
-	f.close()
-	log_line("Saved project.json, %s and the level geometry" % project["layout"]["file"])
+	for w in [["project.json", project], [project["layout"]["file"], layout]]:
+		var f := FileAccess.open(project_dir.path_join(w[0]), FileAccess.WRITE)
+		if f == null:
+			log_line("SAVE FAILED: can't write %s (%s)" % [w[0], error_string(FileAccess.get_open_error())])
+			set_status("Save failed")
+			return
+		f.store_string(JSON.stringify(w[1], " "))
+		f.close()
+	saved_state = _saved_state()
+	log_line("Saved project.json, %s and the level geometry%s" % [project["layout"]["file"],
+		" into " + project_file if project_file != "" else ""])
 	if col_toggle.button_pressed:
 		_on_collision(true)
-	set_status("Saved")
+	set_status("Saving..." if project_file != "" else "Saved")
+	_pack()
 
 func _on_save_as() -> void:
 	if project_dir != "":
+		var from := project_file if project_file != "" else project_dir.simplify_path()
+		save_as_dialog.current_dir = from.get_base_dir()
+		save_as_dialog.current_file = from.get_file().get_basename() + "_copy.lpme"
 		save_as_dialog.popup_centered_ratio(0.6)
 
 func _copy_tree(from: String, to: String) -> void:
@@ -914,36 +1314,40 @@ func _copy_tree(from: String, to: String) -> void:
 	var d := DirAccess.open(from)
 	d.include_hidden = true
 	for f in d.get_files():
-		DirAccess.copy_absolute(from.path_join(f), to.path_join(f))
+		if not (from == project_dir and f == ".lpme"):   # the workspace's stamp
+			DirAccess.copy_absolute(from.path_join(f), to.path_join(f))
 	for sub in d.get_directories():
 		if not (from == project_dir and sub == "build"):
 			_copy_tree(from.path_join(sub), to.path_join(sub))
 
-func save_project_as(dir: String) -> void:
-	# a copy of the project in dir (empty, or a new folder), which then becomes the open project. It gets its own
+func save_project_as(path: String) -> void:
+	# the map as a new .lpme (its own workspace, a copy of this one), which then becomes the open map. It gets its own
 	# tag (the package's resource folder, unique per package) so installing it doesn't replace the original map
-	if project_dir == "" or dir.simplify_path() == project_dir.simplify_path():
+	if project_dir == "":
 		return
-	var there := DirAccess.open(dir)
-	if there != null:
-		there.include_hidden = true
-	if there != null and not (there.get_files().is_empty() and there.get_directories().is_empty()):
-		log_line("Save as: pick an empty folder (%s has files in it)" % dir)
+	if path.get_extension().to_lower() != "lpme":
+		path += ".lpme"
+	if path.simplify_path() == project_file.simplify_path():
+		save_project()
 		return
-	_copy_tree(project_dir, dir)
+	var ws: String = Lpme.workspace(path)
+	if ws.simplify_path() != project_dir.simplify_path():
+		Lpme.clear(ws, false)
+		_copy_tree(project_dir, ws)
 	var stem := ""
-	for c in dir.get_file().to_lower():
+	for c in path.get_file().get_basename().to_lower():
 		if (c >= "a" and c <= "z") or (c >= "0" and c <= "9"):
 			stem += c
 	project["info"]["tag"] = (stem + "map___").substr(0, 6) + "%02x" % (randi() % 256)
-	var old := project_dir
-	project_dir = dir
-	library.load_imports(dir)
-	cfg.set_value("recent", "project", dir)
+	var old := project_file if project_file != "" else project_dir
+	project_dir = ws
+	project_file = path
+	library.load_imports(ws)
+	cfg.set_value("recent", "project", path)
 	cfg.save(SETTINGS)
 	save_project()
-	DisplayServer.window_set_title("LP2 Map Editor - %s" % project["info"].get("name", dir))
-	log_line("Saved as %s (copied from %s; package tag %s)" % [dir, old, project["info"]["tag"]])
+	DisplayServer.window_set_title("LP2 Map Editor - %s" % path.get_file())
+	log_line("Saved as %s (copied from %s; package tag %s)" % [path, old, project["info"]["tag"]])
 
 func _on_water() -> void:
 	if updating_ui or project.is_empty():
@@ -953,6 +1357,95 @@ func _on_water() -> void:
 func _on_physics(b: bool) -> void:
 	if not updating_ui and project.has("collision"):
 		project["collision"]["rebuild_physics"] = b
+
+# ---------------------------------------------------------------- thumbnail
+
+func capture_thumbnail() -> void:
+	# a square render from the current camera in an off-screen viewport (no panels in it), saved as thumbnail.png
+	if project_dir == "":
+		return
+	var sv := SubViewport.new()
+	sv.size = Vector2i(1024, 1024)
+	sv.world_3d = get_viewport().world_3d
+	sv.render_target_update_mode = SubViewport.UPDATE_ONCE
+	var cam := Camera3D.new()
+	cam.global_transform = camera.global_transform
+	cam.fov = camera.fov
+	cam.near = camera.near
+	cam.far = camera.far
+	cam.environment = camera.environment
+	sv.add_child(cam)
+	add_child(sv)
+	cam.make_current()
+	# as the game shows it: no markers, volumes, gizmo, kill sheet, collision view or selection
+	var keep_sel := selection.duplicate()
+	select([])
+	var hide: Array = [markers_root, gizmo, preview, kill_plane, col_mesh] + world.find_children("wall_*", "", true, false)
+	var shown: Array = hide.filter(func(n): return n != null and is_instance_valid(n) and n.visible)
+	for n in shown:
+		n.visible = false
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
+	var img := sv.get_texture().get_image()
+	sv.queue_free()
+	for n in shown:
+		n.visible = true
+	select(keep_sel)
+	img.save_png(project_dir.path_join("thumbnail.png"))
+	_set_thumbnail({"image": "thumbnail.png", "zoom": 1.0, "at": [0.5, 0.5]})
+	log_line("Thumbnail captured from the view (thumbnail.png); it goes into the map on the next Install / Export.")
+
+func _thumbnail_from_file(path: String) -> void:
+	var img := Image.load_from_file(path)
+	if img == null or img.is_empty():
+		log_line("Thumbnail: can't read " + path)
+		return
+	img.save_png(project_dir.path_join("thumbnail.png"))   # a copy in the project, so it travels with it
+	_set_thumbnail({"image": "thumbnail.png", "zoom": 1.0, "at": [0.5, 0.5]})
+	log_line("Thumbnail set from " + path.get_file())
+
+func _set_thumbnail(t: Variant) -> void:
+	if project.is_empty():
+		return
+	_push_undo("")
+	project["info"]["thumbnail"] = t
+	_show_thumbnail()
+
+func _show_thumbnail() -> void:
+	var t: Variant = project.get("info", {}).get("thumbnail") if not project.is_empty() else null
+	var tex: Texture2D = null
+	if t is Dictionary:
+		var img := Image.load_from_file(project_dir.path_join(String(t.get("image", ""))))
+		if img and not img.is_empty():
+			var side := mini(img.get_width(), img.get_height())   # the square the circle sits in
+			var at: Array = t.get("at", [0.5, 0.5])
+			var x := clampi(int(float(at[0]) * img.get_width() - side / 2.0), 0, img.get_width() - side)
+			var y := clampi(int(float(at[1]) * img.get_height() - side / 2.0), 0, img.get_height() - side)
+			tex = ImageTexture.create_from_image(img.get_region(Rect2i(x, y, side, side)))
+	thumb_preview.texture = tex
+	var z := float(t.get("zoom", 1.0)) if t is Dictionary else 1.0
+	(thumb_preview.material as ShaderMaterial).set_shader_parameter("zoom", z)
+	var was := updating_ui   # open_project calls this mid-load: keep its guard up
+	updating_ui = true
+	thumb_zoom.value = z
+	thumb_zoom.editable = t is Dictionary
+	updating_ui = was
+
+func _on_gravity() -> void:
+	if updating_ui or project.is_empty():
+		return
+	if not project.has("environment"):
+		project["environment"] = {}
+	var env: Dictionary = project["environment"]
+	for k in [["jump_packs", lowgrav_on.button_pressed], ["underwater", underwater_on.button_pressed]]:
+		if k[1]:
+			env[k[0]] = true
+		else:
+			env.erase(k[0])
+	if gravity_spin.value != 1.0:
+		env["gravity"] = gravity_spin.value
+	else:
+		env.erase("gravity")
 
 func _on_kill() -> void:
 	if updating_ui or project.is_empty():
@@ -1105,6 +1598,9 @@ func load_stage(frame := true) -> void:
 		log_line(err + ": rebuild the preview")
 		return
 	log_line("Level geometry: %d pieces (%.1f s)" % [geometry.get_child_count(), (Time.get_ticks_msec() - t0) / 1000.0])
+	if opening:
+		saved_state = _saved_state()
+		opening = false
 	lighting.preview_bake()   # the new materials get the bake's live settings
 	_rebuild_prefabs()
 	_rebuild_outliner()
@@ -1409,12 +1905,18 @@ func _screenshot() -> void:
 		if not ls.is_empty():
 			select([ls[0]])
 		await get_tree().create_timer(4.0).timeout
-	if OS.get_cmdline_user_args().has("--place"):   # a VS put down mid-screen, aimed to the right
-		placer.popup()
-		placer.kind_pick.select(2)
+	if OS.get_cmdline_user_args().has("--input-test"):   # placing / gizmo / Ctrl+face through the real input path
+		await _input_test()
+	var place_volume := OS.get_cmdline_user_args().has("--place-volume")
+	if OS.get_cmdline_user_args().has("--place") or place_volume:   # a VS put down mid-screen, aimed to the right
+		placer.popup()                                              # (--place-volume: a post volume dragged out)
+		placer.kind_pick.select(3 if place_volume else 2)
 		placer._fill_items()
+		if place_volume:
+			placer.item_pick.select(2)
 		var mid := get_viewport().get_visible_rect().size / 2
-		for ev in [[true, mid], [false, mid + Vector2(80, 0)], [false, mid + Vector2(160, 10)]]:
+		var far := Vector2(160, 120) if place_volume else Vector2(160, 10)
+		for ev in [[true, mid], [false, mid + Vector2(80, 0)], [false, mid + far]]:
 			var b := InputEventMouseButton.new() if ev[0] else null
 			if b:
 				b.button_index = MOUSE_BUTTON_LEFT
@@ -1427,8 +1929,13 @@ func _screenshot() -> void:
 				placer.handle(mm)
 		var up := InputEventMouseButton.new()
 		up.button_index = MOUSE_BUTTON_LEFT
-		up.position = mid + Vector2(160, 10)
+		up.position = mid + far
 		placer.handle(up)
+		if OS.get_cmdline_user_args().has("--preview-post") and not selection.is_empty():   # the camera into it, preview on
+			view_toggles["post"].set_pressed_no_signal(true)
+			var c: Vector3 = selection[0].global_position + Vector3(0, 3, 0)
+			camera.look_at_point(c + Vector3(30, -8, 0), c)
+			await get_tree().create_timer(2.0).timeout
 		await get_tree().create_timer(8.0).timeout   # thumbnails render one per frame
 		await RenderingServer.frame_post_draw
 		placer.get_texture().get_image().save_png(screenshot_path.get_basename() + "-place.png")
@@ -1439,6 +1946,9 @@ func _screenshot() -> void:
 		placer.get_texture().get_image().save_png(screenshot_path.get_basename() + "-place-end.png")
 	await RenderingServer.frame_post_draw
 	get_viewport().get_texture().get_image().save_png(screenshot_path)
+	if thumb_on_start:
+		await capture_thumbnail()
+		save_project()
 	if info_win.visible:
 		await RenderingServer.frame_post_draw
 		info_win.get_texture().get_image().save_png(screenshot_path.get_basename() + "-info.png")
@@ -1521,6 +2031,7 @@ func show_set(i: int) -> void:
 		for o in s["objects"]:
 			_add_marker(o, true)
 	lighting.add_markers()
+	volumes.add_markers()
 	_rebuild_outliner()
 	_update_stats()
 
@@ -1544,9 +2055,11 @@ func _marker_label(d: Dictionary, is_object: bool) -> String:
 
 func _category(n: Node3D) -> int:
 	if _is_wall(n):
-		return 5
+		return 6
 	if n.get_parent() == geometry:
 		return 3
+	if n.has_meta("volume"):
+		return 5
 	if n.has_meta("light"):
 		return 4
 	if not n.get_meta("object"):
@@ -1707,6 +2220,8 @@ func _store_marker(n: Node3D) -> void:
 	d["yaw"] = snappedf(n.rotation_degrees.y, 0.01)
 	if n.has_meta("light"):
 		lighting.update_marker(n)
+	elif n.has_meta("volume"):
+		volumes.update_marker(n)
 
 func _is_marker(n: Node3D) -> bool:
 	return n.get_parent() == markers_root
@@ -1720,7 +2235,7 @@ func _rebuild_outliner() -> void:
 	outliner.clear()
 	var root := outliner.create_item()
 	cat_items = []
-	var nodes: Array = [[], [], [], [], []]
+	var nodes: Array = [[], [], [], [], [], [], []]
 	for n in markers_root.get_children():
 		nodes[_category(n)].append(n)
 	nodes[3] = geometry.get_children()
@@ -1738,8 +2253,11 @@ func _rebuild_outliner() -> void:
 				ch.set_text(0, geometry.label(n))
 			else:
 				var d: Dictionary = n.get_meta("data")
-				ch.set_text(0, lighting.label(d) if c == 4 else _marker_label(d, n.get_meta("object")))
-				ch.set_custom_color(0, ((n.get_child(0) as MeshInstance3D).material_override as StandardMaterial3D).albedo_color.lightened(0.3))
+				ch.set_text(0, volumes.label(d) if n.has_meta("volume") else lighting.label(d) if c == 4 else _marker_label(d, n.get_meta("object")))
+				var col: Color = ((n.get_child(0) as MeshInstance3D).material_override as StandardMaterial3D).albedo_color.lightened(0.3)
+				col.a = 1.0   # volumes' boxes are see-through
+				ch.set_custom_color(0, col)
+	apply_marker_visibility()
 	_sync_tree()
 	if browser:
 		browser.refresh_level()
@@ -1802,6 +2320,8 @@ func _set_selection(ns: Array) -> void:
 func _highlight(n: Node3D, on: bool) -> void:
 	if _is_wall(n):
 		(n.get_child(0) as Node3D).visible = on
+	elif _is_marker(n) and n.has_meta("volume"):
+		volumes.set_selected(n, on)
 	elif _is_marker(n):
 		var m := (n.get_child(0) as MeshInstance3D).material_override as StandardMaterial3D
 		m.emission_enabled = on
@@ -1824,8 +2344,10 @@ func _place_gizmo() -> void:
 	_gizmo_limits()
 
 func _gizmo_limits() -> void:
-	var markers := selection.any(func(n): return _is_marker(n))
-	gizmo.set_limits(not markers, not markers)
+	# markers: move and turn about Y; volumes: move, size and turn about Y; pieces: everything
+	var markers := selection.any(func(n): return _is_marker(n) and not n.has_meta("volume"))
+	var vols := selection.any(func(n): return n.has_meta("volume"))
+	gizmo.set_limits(not markers, not markers and not vols, true)
 
 func _show_inspector() -> void:
 	updating_ui = true
@@ -1863,6 +2385,7 @@ func _show_inspector() -> void:
 		dig_pile.disabled = not dig_on.button_pressed
 	var typed := _typed_markers()
 	type_box.visible = not typed.is_empty()
+	volumes.show_inspector(selection)
 	if not typed.is_empty():
 		var have: Array = _marker_types(typed[0].get_meta("data"))
 		for i in GAME_TYPES.size():
@@ -1877,7 +2400,7 @@ func _show_inspector() -> void:
 		insp_title.text = "%d selected" % selection.size()
 	elif _is_marker(one):
 		var d: Dictionary = one.get_meta("data")
-		insp_title.text = lighting.label(d) if one.has_meta("light") else "%s\nkind %s" % [_marker_label(d, one.get_meta("object")), str(d.get("kind", "?"))]
+		insp_title.text = volumes.label(d) if one.has_meta("volume") else lighting.label(d) if one.has_meta("light") else "%s\nkind %s" % [_marker_label(d, one.get_meta("object")), str(d.get("kind", "?"))]
 		for a in 3:
 			insp_pos[a].value = float(d["pos"][a])
 		insp_rot[1].value = float(d.get("yaw", 0.0))
@@ -1906,6 +2429,8 @@ func _on_inspector() -> void:
 		_place(n)
 		if n.has_meta("light"):
 			lighting.update_marker(n)
+		elif n.has_meta("volume"):
+			volumes.update_marker(n)
 	else:
 		var rot := Vector3(insp_rot[0].value, insp_rot[1].value, insp_rot[2].value) * (PI / 180.0)
 		var sc := Vector3(insp_scale[0].value, insp_scale[1].value, insp_scale[2].value)
@@ -2042,7 +2567,7 @@ func _on_set_type(k: int) -> void:
 	log_line("Set: %s" % _set_label(shown))
 
 func _typed_markers() -> Array:
-	return selection.filter(func(n): return _is_marker(n) and not n.has_meta("light"))
+	return selection.filter(func(n): return _is_marker(n) and not n.has_meta("light") and not n.has_meta("volume"))
 
 func _marker_types(d: Dictionary) -> Array:
 	return d["modes"] if d.get("modes") is Array else GAME_TYPES.map(func(t): return t[0])
@@ -2148,6 +2673,8 @@ func _pick(mp: Vector2) -> Node3D:
 	var best: Node3D = null
 	var best_d := INF
 	for n in markers_root.get_children():
+		if not n.visible:   # hidden by the view toggles
+			continue
 		for at in [n.global_position + Vector3(0, 1.0, 0), (n.get_child(2) as Node3D).global_position]:
 			if camera.is_position_behind(at):
 				continue
@@ -2228,10 +2755,11 @@ func ungroup_selected() -> void:
 func duplicate_selected() -> void:
 	var ps := _pieces_selected()
 	var ls := selection.filter(func(n): return n.has_meta("light"))
-	if ps.is_empty() and ls.is_empty():
+	var vs := selection.filter(func(n): return n.has_meta("volume"))
+	if ps.is_empty() and ls.is_empty() and vs.is_empty():
 		return
 	_push_undo("")
-	var out: Array = lighting.duplicate_lights(ls)
+	var out: Array = lighting.duplicate_lights(ls) + volumes.duplicate_volumes(vs)
 	for p in ps:
 		out.append(geometry.duplicate_piece(p, Vector3(2.0, 0, 0)))
 	_after_structure(out)
@@ -2241,7 +2769,8 @@ func delete_selected() -> void:
 	var ps := _pieces_selected()
 	var ls := selection.filter(func(n): return n.has_meta("light"))
 	# markers placed in the editor (place.gd); the stock ones' counts follow the stock files
-	var ms := selection.filter(func(n): return _is_marker(n) and not n.has_meta("light") and (n.get_meta("data") as Dictionary).get("placed", false))
+	var vs := selection.filter(func(n): return n.has_meta("volume"))
+	var ms := selection.filter(func(n): return _is_marker(n) and not n.has_meta("light") and not n.has_meta("volume") and (n.get_meta("data") as Dictionary).get("placed", false))
 	var ws := selection.filter(func(n): return _is_wall(n))
 	if not ws.is_empty():
 		_push_undo("")
@@ -2250,14 +2779,15 @@ func delete_selected() -> void:
 		log_line("%d invisible wall(s) removed (kept out of the export; Restore deleted brings them back)" % ws.size())
 		select(selection.filter(func(n): return not _is_wall(n)))
 		_on_collision(true)
-		if ps.is_empty() and ls.is_empty() and ms.is_empty():
+		if ps.is_empty() and ls.is_empty() and ms.is_empty() and vs.is_empty():
 			return
-	if ps.is_empty() and ls.is_empty() and ms.is_empty():
+	if ps.is_empty() and ls.is_empty() and ms.is_empty() and vs.is_empty():
 		if not selection.is_empty():
 			log_line("Only markers placed in the editor can be deleted (the stock ones' counts follow the stock files).")
 		return
 	_push_undo("")
 	lighting.delete_lights(ls)
+	volumes.delete_volumes(vs)
 	if not ms.is_empty() and set_index >= 0:
 		var st: Dictionary = layout["sets"][set_index]
 		for n in ms:
@@ -2410,8 +2940,10 @@ func toggle_browser() -> void:
 		browser.popup()
 
 func _prefab_pick() -> int:
+	# the browser's selected prefab (My assets items: ["prefab", index] / folders / meshes)
 	var s := prefab_list.get_selected_items()
-	return s[0] if s.size() else -1
+	var m: Variant = prefab_list.get_item_metadata(s[0]) if s.size() else null
+	return m[1] if m is Array and m.size() == 2 and m[0] == "prefab" else -1
 
 func make_prefab() -> void:
 	var ps := _pieces_selected()
@@ -2419,6 +2951,8 @@ func make_prefab() -> void:
 		log_line("Select level geometry first.")
 		return
 	var pf: Dictionary = geometry.make_prefab(ps, ps[0].get_meta("tree")["name"])
+	if browser.folder != "":
+		pf["folder"] = browser.folder
 	_rebuild_prefabs()
 	log_line("Prefab '%s' made from %d piece(s). Place copies from the Browser (B)." % [pf["name"], ps.size()])
 
@@ -2458,7 +2992,7 @@ func delete_prefab() -> void:
 # ---------------------------------------------------------------- undo
 
 func _snapshot() -> Array:
-	return [geometry.snapshot(), layout.duplicate(true), (project.get("environment", {}) as Dictionary).duplicate(true), (project.get("lights", []) as Array).duplicate(true)]
+	return [geometry.snapshot(), layout.duplicate(true), (project.get("environment", {}) as Dictionary).duplicate(true), (project.get("lights", []) as Array).duplicate(true), (project.get("volumes", []) as Array).duplicate(true)]
 
 func _push_undo(key: String) -> void:
 	# one entry per action; a run of the same key (typing in the inspector) within 1.5 s is one entry
@@ -2481,6 +3015,7 @@ func _restore(s: Array) -> void:
 	layout = s[1]
 	project["environment"] = s[2]
 	project["lights"] = s[3]
+	project["volumes"] = s[4] if s.size() > 4 else []
 	for i in visible_sets.size():
 		set_pick.set_item_text(i, _set_label(visible_sets[i]))
 	show_set(set_index)
@@ -2521,6 +3056,8 @@ func _update_stats() -> void:
 	var now: Dictionary = geometry.stats()
 	var v0 := float(base["vertices"]) * 28.0 + float(base["triangles"]) * 6.0
 	var model: float = float(base.get("model_bytes", 0)) * (float(now["vertices"]) * 28.0 + float(now["triangles"]) * 6.0) / max(v0, 1.0)
+	var detail: Dictionary = lighting.detail_estimate()   # the lighting detail splits the built stage
+	model += float(detail.get("bytes", 0.0))
 	var borrowed: Dictionary = geometry.borrowed_textures()
 	var btex := 0.0
 	for n in borrowed:
@@ -2534,17 +3071,19 @@ func _update_stats() -> void:
 	perf_bar.value = ratio
 	perf_bar.modulate = Color(0.4, 0.9, 0.4) if ratio <= 1.0 else Color(1.0, 0.75, 0.2) if ratio <= 1.15 else Color(1.0, 0.3, 0.3)
 	perf_bar.tooltip_text = "Stage model + textures against the stock map (Desecration) the package is built on: %d%%" % int(ratio * 100)
+	lighting.show_detail(model, total, target)
 	if not perf_panel.visible:
 		return
 	for c in perf_grid.get_children():
 		perf_grid.remove_child(c)
 		c.queue_free()
-	var counts := [0, 0, 0, 0]
+	var counts := [0, 0, 0, 0, 0, 0, 0]
 	for n in markers_root.get_children():
 		counts[_category(n)] += 1
 	var rows := [
 		["Memory (estimate)", "%.1f MB of %.1f MB (%d%%)" % [total / 1e6, target / 1e6, int(ratio * 100)]],
 		["  stage model", "%.1f MB (stock %.1f)" % [model / 1e6, float(stock.get("rModel", 0)) / 1e6]],
+		["  lighting detail", "%.1f MB, up to %d vertices" % [float(detail.get("bytes", 0.0)) / 1e6, int(detail.get("added", 0))]],
 		["  textures", "%.1f MB, %d (stock %.1f)" % [tex / 1e6, int(base["textures"]) + borrowed.size(), float(stock.get("rTexture", 0)) / 1e6]],
 		["  from other maps", "%.1f MB, %d textures" % [btex / 1e6, borrowed.size()]],
 		["  collision (stock)", "%.1f MB" % (float(stock.get("rCollision", 0)) / 1e6)],
@@ -2567,9 +3106,25 @@ func _update_stats() -> void:
 # ---------------------------------------------------------------- input
 
 func _unhandled_input(e: InputEvent) -> void:
+	if camera.is_looking() and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		camera.stop_look()   # its release went to another window: don't swallow clicks until the next right click
 	if camera.is_looking() or preview.active():
 		return
-	if placer.placing() and placer.handle(e):
+	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_RIGHT and e.pressed and e.ctrl_pressed and e.shift_pressed:
+		var bh: Dictionary = volumes.face_hit(e.position)   # Ctrl+Shift+right click: delete the volume box under the mouse
+		if not bh.is_empty() and volumes.sub_boxes(bh["node"].get_meta("data")).size() > 1:
+			_push_undo("")
+			volumes.delete_box(bh["node"], bh["box"])
+			select([bh["node"]])
+			log_line("Removed a box from the volume.")
+		elif not bh.is_empty():
+			set_status("A volume's only box: delete the volume instead")
+		get_viewport().set_input_as_handled()
+		return
+	# the gizmo and Ctrl+drag on a volume face come before placing (a click elsewhere places)
+	var tool_press: bool = e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT and e.pressed \
+		and (gizmo.hit(e.position) >= 0 or (e.ctrl_pressed and not volumes.face_hit(e.position).is_empty()))
+	if not tool_press and not gizmo.dragging() and face_press.is_empty() and placer.placing() and placer.handle(e):
 		return
 	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT:
 		if e.pressed:
@@ -2578,6 +3133,9 @@ func _unhandled_input(e: InputEvent) -> void:
 				_push_undo("")
 				gizmo.begin(h, e.position)
 				drag_start = selection.map(func(n): return n.transform)
+				drag_sizes = selection.map(func(n): return (n.get_meta("data")["size"] as Array).duplicate() if n.has_meta("volume") else null)
+			elif e.ctrl_pressed and not volumes.face_hit(e.position).is_empty():
+				face_press = {"hit": volumes.face_hit(e.position), "at": e.position, "shift": e.shift_pressed}
 			else:
 				var n := _pick(e.position)
 				if e.shift_pressed or e.ctrl_pressed:
@@ -2589,6 +3147,20 @@ func _unhandled_input(e: InputEvent) -> void:
 					select(s)
 				else:
 					select([n] if n else [])
+		elif not face_press.is_empty():
+			if volumes.face.is_empty():   # a Ctrl+click, not a drag: add / remove from the selection as before
+				var n: Node3D = face_press["hit"]["node"]
+				var s := selection.duplicate()
+				if s.has(n):
+					s.erase(n)
+				else:
+					s.append(n)
+				select(s)
+			else:
+				volumes.end_face()
+				_place_gizmo()
+				_update_stats()
+			face_press = {}
 		elif gizmo.dragging():
 			gizmo.end()
 			for n in selection:
@@ -2597,6 +3169,13 @@ func _unhandled_input(e: InputEvent) -> void:
 			_place_gizmo()
 			_show_inspector()
 			_update_stats()
+	elif e is InputEventMouseMotion and not face_press.is_empty():
+		if volumes.face.is_empty() and e.position.distance_to(face_press["at"]) > 4.0:
+			_push_undo("")
+			select([face_press["hit"]["node"]])
+			volumes.begin_face(face_press["hit"], face_press["shift"])   # Ctrl+Shift: a new box out of the face
+		if not volumes.face.is_empty():
+			volumes.drag_face(e.position, snap_toggle.button_pressed or (e.shift_pressed and not face_press["shift"]))
 	elif e is InputEventMouseMotion and gizmo.dragging():
 		gizmo.snap = snap_toggle.button_pressed or Input.is_key_pressed(KEY_CTRL)
 		var delta: Transform3D = gizmo.drag(e.position)
@@ -2604,6 +3183,21 @@ func _unhandled_input(e: InputEvent) -> void:
 		for i in selection.size():
 			var n: Node3D = selection[i]
 			var st: Transform3D = drag_start[i]
+			if n.has_meta("volume"):   # boxes: moved, or sized by the scale (never turned or scaled as nodes)
+				var d: Dictionary = n.get_meta("data")
+				var f := delta.basis.get_scale() if gizmo.mode == 2 else Vector3.ONE
+				if gizmo.mode == 2 and absf(st.basis.get_euler().y) > 0.001:
+					# a turned box: the world axis dragged sizes its nearest own axis
+					var ax := [0, 1, 2]
+					var r := st.basis.orthonormalized()
+					if absf(r.x.dot(Vector3.RIGHT)) < absf(r.z.dot(Vector3.RIGHT)):
+						ax = [2, 1, 0]
+					f = Vector3(f[ax[0]], f[1], f[ax[2]])
+				d["size"] = [maxf(10.0, drag_sizes[i][0] * f.x), maxf(10.0, drag_sizes[i][1] * f.y), maxf(10.0, drag_sizes[i][2] * f.z)]
+				var turned := (delta * st).orthonormalized() if gizmo.mode == 1 else Transform3D(st.basis.orthonormalized(), st.origin)
+				n.transform = Transform3D(turned.basis, (delta * st).origin if selection.size() > 1 or gizmo.mode != 2 else st.origin)
+				_store_marker(n)
+				continue
 			if local_scale >= 0 or (gizmo.mode == 2 and gizmo._handle == 3 and selection.size() == 1):
 				n.transform = Transform3D(st.basis * delta.basis, st.origin)  # scale along the piece's own axes
 			else:

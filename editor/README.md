@@ -8,7 +8,9 @@ Start it from the app menu ("LP2 Map Editor") or with `./run.sh [--project DIR]`
 project.
 
 ## What works
-- **Open** a project folder. The stage preview (`.preview/geo.json` + `geo.bin` + `tex/`) is built the first
+- **Open** a `.lpme` map (a zip of the project, unpacked into a workspace under the editor's data folder and
+  packed back on every save; a bare `project.json` still opens). **Import map from LP/LP2...** starts one from an
+  LP1 or stock LP2 map. The stage preview (`.preview/geo.json` + `geo.bin` + `tex/`) is built the first
   time, which takes about 2 minutes (progress bar, top right), then cached.
 - **Viewport:** the stage with its textures and LP1 baked light (toggle **Baked light** for sun lighting).
   - Hold the right mouse button to look; WASD to move, Q / E down / up, Shift for faster, mouse wheel
@@ -38,7 +40,7 @@ project.
   the start, Esc back to the editor. The speeds / heights are guesses to tune against the game (settings.cfg
   [preview]: run, walk, crouch_speed, jump, gravity, height, crouch_height, radius, grapple_range, grapple_speed,
   slope, step, fov).
-- **Lighting (L)**: sun (direction, colour x brightness), sky light from above / below and ambient (the game's
+- **Lighting (L)**, work in progress (doesn't fully match the game yet): sun (direction, colour x brightness), sky light from above / below and ambient (the game's
   hemisphere and ambient lights), a stock map's day as a preset, the sky dome (the map's own, a stock map's sky,
   or a panorama image copied into `assets/`) and atmosphere (scattering preset, haze, sky tint). Placed point and
   spot lights (the engine's placeable types) are markers under Lights in the outliner: gizmo to move / turn,
@@ -46,10 +48,12 @@ project.
   (a quick click, no turn) for the same settings in a popup. Export: lp2light.py --env
   (Light / Filter schedulers) and lp2sky.py (sky model in the online00_car1 slot). The preview shows the sun,
   ambient, the sky and placed lights (in baked mode they add on top of the bake).
-- **Mesh builder (M)**: a floating window to import OBJ / glTF files (Y up, metres: Blender's default export) as
-  pieces (lp2mesh.py; kept in the project's `imports/`). Each file is one piece; double-click (or Place) puts a copy
-  where the view points, and the Browser lists them under Game assets > Imported meshes.
-  - Per mesh: collision (own mesh, its box, or none), scale, and which project material each of the file's materials uses.
+- **Mesh builder (M)**, experimental (WIP): a floating window to import OBJ / glTF files (Y up, metres: Blender's
+  default export) as pieces (lp2mesh.py; kept in the project's `imports/`). Each file is one piece; double-click (or
+  Place) puts a copy where the view points, and the Browser lists them under My assets (New custom mesh, folders).
+  - Collision objects: a Blender object named `COL_<name>` (any `.001` suffix) is the collision of `<name>` and isn't
+    drawn; objects without one collide with their own triangles.
+  - Per mesh: collision (own mesh / COL_ objects, its box, or none), scale, and which project material each of the file's materials uses.
     Apply rebuilds it; Re-import reads the file again from where it came from. Placed copies follow either way.
   - Materials (the project's `materials/`): colour map, normal map (OpenGL style), specular mask (white = shiny), or a
     plain colour; largest side 256-2048 px. A file's own materials become project materials of the same name (an

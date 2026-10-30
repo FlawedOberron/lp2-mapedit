@@ -54,7 +54,8 @@ def read_sbc1(b):
 
 def write_sbc1(groups, flags=0x3FFFFF00):
     """groups [dict(verts [(x, y, z)], tris [((a, b, c), surface)])] -> LP1 SBC1 (PC, little-endian) as read_sbc1
-    reads it (no surface table or BVH: nothing here uses them). A group holds at most 65535 vertices."""
+    reads it (no surface table or BVH: nothing here uses them). surface: the triangle's LP1 flags (0x8000xxxx
+    materials), or 0 for flags. A group holds at most 65535 vertices."""
     ng = len(groups)
     ntri = sum(len(g["tris"]) for g in groups)
     nv = sum(len(g["verts"]) for g in groups)
@@ -66,8 +67,8 @@ def write_sbc1(groups, flags=0x3FFFFF00):
     for i, g in enumerate(groups):
         assert len(g["verts"]) <= 65535
         grp += struct.pack("<6I", 0, t0, 0, v0, i, 0)
-        for (a, b, c), _surface in g["tris"]:
-            tri += bytes(16) + struct.pack("<3H6xI16x", a, b, c, flags)
+        for (a, b, c), surface in g["tris"]:
+            tri += bytes(16) + struct.pack("<3H6xI16x", a, b, c, surface or flags)
         for v in g["verts"]:
             vert += struct.pack("<3fI", *v, 0)
         t0 += len(g["tris"])
@@ -150,6 +151,15 @@ def kill_quad(groups, y, margin=5000.0):
     x0, x1, z0, z1 = min(xs) - margin, max(xs) + margin, min(zs) - margin, max(zs) + margin
     verts = [(x0, y, z1), (x1, y, z0), (x0, y, z0), (x1, y, z1)]   # stock winding: normal +y
     return dict(verts=verts, tris=[((0, 1, 2), KILL), ((3, 1, 0), KILL)])
+
+
+def kill_top(corners, y):
+    """a kill surface quad (kill_quad's flag) over 4 x / z corners at height y: a kill volume's top, turned with it"""
+    verts = [(x, y, z) for x, z in corners]
+    (ax, _, az), (bx, _, bz), (cx, _, cz) = verts[:3]
+    up = (cx - ax) * (bz - az) - (bx - ax) * (cz - az) > 0   # the normal +y as the stock quad's (see kill_quad)
+    tris = [(0, 1, 2), (0, 2, 3)] if up else [(0, 2, 1), (0, 3, 2)]
+    return dict(verts=verts, tris=[(t, KILL) for t in tris])
 
 
 def write_lp2(groups, template):

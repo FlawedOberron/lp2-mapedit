@@ -33,6 +33,10 @@ func _apply() -> void:
 func is_looking() -> bool:
 	return _look
 
+func stop_look() -> void:
+	_look = false
+	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
 const MOVE_KEYS := [KEY_W, KEY_A, KEY_S, KEY_D, KEY_Q, KEY_E, KEY_SPACE, KEY_CTRL, KEY_SHIFT]
 
 func _input(e: InputEvent) -> void:
@@ -42,6 +46,8 @@ func _input(e: InputEvent) -> void:
 
 func _unhandled_input(e: InputEvent) -> void:
 	if e is InputEventMouseButton:
+		if e.button_index == MOUSE_BUTTON_RIGHT and e.ctrl_pressed and e.shift_pressed:
+			return   # Ctrl+Shift+right click: the editor's (deletes a volume's box)
 		if e.button_index == MOUSE_BUTTON_RIGHT:
 			_look = e.pressed
 			if e.pressed:

@@ -13,12 +13,14 @@ var mode := Mode.MOVE
 var camera: Camera3D
 var allow_scale := true
 var allow_tilt := true   # markers only turn about Y
+var allow_yaw := true    # volumes don't turn at all
 var snap := false
 var _handle := -1        # 0..2 axis, 3 = centre (move on the camera plane / uniform scale)
 var _start_hit := Vector3.ZERO
 var _start_mouse := Vector2.ZERO
 var _origin := Vector3.ZERO
 var _parts: Array = []
+var _centre: MeshInstance3D
 
 func _ready() -> void:
 	_build()
@@ -82,28 +84,31 @@ func _build() -> void:
 			elif a == 2:
 				root.rotation_degrees.x = 90
 		_parts.append(root)
-	var centre := MeshInstance3D.new()
+	_centre = MeshInstance3D.new()
 	var s := SphereMesh.new()
 	s.radius = 0.06
 	s.height = 0.12
-	centre.mesh = s
-	centre.material_override = _mat(Color(0.95, 0.95, 0.95))
-	add_child(centre)
+	_centre.mesh = s
+	_centre.material_override = _mat(Color(0.95, 0.95, 0.95))
+	add_child(_centre)
 	_style()
 
 func set_mode(m: int) -> void:
 	mode = m
 	_build()
 
-func set_limits(scale_ok: bool, tilt_ok: bool) -> void:
+func set_limits(scale_ok: bool, tilt_ok: bool, yaw_ok := true) -> void:
 	allow_scale = scale_ok
 	allow_tilt = tilt_ok
+	allow_yaw = yaw_ok
 	_style()
 
 func _style() -> void:
 	for a in _parts.size():
-		var off := (mode == Mode.SCALE and not allow_scale) or (mode == Mode.ROTATE and not allow_tilt and a != 1)
+		var off := (mode == Mode.SCALE and not allow_scale) or (mode == Mode.ROTATE and not (allow_yaw if a == 1 else allow_tilt))
 		_parts[a].visible = not off
+	if _centre:   # the centre: free move, or uniform scale where scaling is allowed
+		_centre.visible = mode == Mode.MOVE or (mode == Mode.SCALE and allow_scale)
 
 func _size() -> float:
 	return max(camera.global_position.distance_to(global_position) * SCREEN, 0.05) if camera else 1.0
@@ -126,7 +131,7 @@ func hit(mp: Vector2) -> int:
 		return -1
 	var o := global_position
 	var s := _size()
-	if _screen(o).distance_to(mp) < PICK_PX + 4 and mode != Mode.ROTATE:
+	if _screen(o).distance_to(mp) < PICK_PX + 4 and (mode == Mode.MOVE or (mode == Mode.SCALE and allow_scale)):
 		return 3
 	var best := -1
 	var best_d := PICK_PX

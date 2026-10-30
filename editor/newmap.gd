@@ -1,8 +1,10 @@
 extends Window
-# New map window: a project from one of Lost Planet 1's maps (lp2project.py import-lp1 --game: its stage, collision,
-# physics and layout, converted to explicit LP2 markers), saved in a new folder and opened.
+# Import map window: a new map (.lpme) from one of Lost Planet 1's maps (lp2project.py import-lp1 --game: its stage,
+# collision, physics and layout, converted to explicit LP2 markers) or one of Lost Planet 2's online maps
+# (lp2project.py import-lp2), saved and opened.
 
 var main: Node
+var source_pick: OptionButton
 var map_pick: OptionButton
 var name_edit: LineEdit
 var folder_edit: LineEdit
@@ -10,7 +12,7 @@ var note: Label
 var browse: FileDialog
 
 func _init() -> void:
-	title = "New map from Lost Planet 1"
+	title = "Import map from Lost Planet 1 / 2"
 	size = Vector2i(600, 280)
 	min_size = Vector2i(460, 240)
 	transient = true
@@ -30,7 +32,13 @@ func setup(m: Node) -> void:
 	var g := GridContainer.new()
 	g.columns = 2
 	v.add_child(g)
-	_label(g, "LP1 map")
+	_label(g, "From")
+	source_pick = OptionButton.new()
+	source_pick.add_item("Lost Planet 1 (Extreme Condition)")
+	source_pick.add_item("Lost Planet 2")
+	source_pick.item_selected.connect(func(_i): _list_maps())
+	g.add_child(source_pick)
+	_label(g, "Map")
 	map_pick = OptionButton.new()
 	map_pick.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	map_pick.item_selected.connect(func(_i): _suggest())
@@ -40,7 +48,7 @@ func setup(m: Node) -> void:
 	name_edit.placeholder_text = "Area 921"
 	name_edit.text_changed.connect(func(_t): _suggest_folder())
 	g.add_child(name_edit)
-	_label(g, "Project folder")
+	_label(g, "Save as")
 	var h := HBoxContainer.new()
 	h.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	g.add_child(h)
@@ -49,6 +57,7 @@ func setup(m: Node) -> void:
 	h.add_child(folder_edit)
 	main._button(h, "Browse...", func():
 		browse.current_dir = folder_edit.text.get_base_dir()
+		browse.current_file = folder_edit.text.get_file()
 		browse.popup_centered_ratio(0.6))
 	note = Label.new()
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD
@@ -60,10 +69,11 @@ func setup(m: Node) -> void:
 	main._button(b, "Cancel", hide)
 	main._button(b, "Create", _on_create)
 	browse = FileDialog.new()
-	browse.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+	browse.file_mode = FileDialog.FILE_MODE_SAVE_FILE
 	browse.access = FileDialog.ACCESS_FILESYSTEM
+	browse.filters = PackedStringArray(["*.lpme ; LP2 map"])
 	browse.use_native_dialog = true
-	browse.dir_selected.connect(func(d: String): folder_edit.text = d)
+	browse.file_selected.connect(func(f: String): folder_edit.text = f if f.get_extension().to_lower() == "lpme" else f + ".lpme")
 	add_child(browse)
 
 func _label(g: GridContainer, t: String) -> void:
@@ -72,34 +82,55 @@ func _label(g: GridContainer, t: String) -> void:
 	g.add_child(l)
 
 func open() -> void:
-	map_pick.clear()
-	var dir: String = main.lp1_dir.path_join("nativePC/ZZPack2")
-	var arcs: Array = []
-	for f in DirAccess.get_files_at(dir):
-		if f.to_lower().begins_with("s9") and f.to_lower().ends_with(".arc"):
-			arcs.append(f)
-	arcs.sort()
-	for f in arcs:
-		map_pick.add_item(f.get_basename())
-		map_pick.set_item_metadata(map_pick.item_count - 1, dir.path_join(f))
-	note.text = "" if arcs.size() else "No LP1 maps found: set the Lost Planet 1 folder in Settings first."
-	_suggest()
+	_list_maps()
 	popup_centered()
+
+func _lp2() -> bool:
+	return source_pick.selected == 1
+
+func _list_maps() -> void:
+	map_pick.clear()
+	note.text = ""
+	if _lp2():
+		if not main.is_lp2_folder(main.game):
+			note.text = "Set the Lost Planet 2 folder in Settings first."
+		for k in main.lighting.MAP_NAMES:
+			map_pick.add_item("%s (online %s)" % [main.lighting.MAP_NAMES[k], k])
+			map_pick.set_item_metadata(map_pick.item_count - 1, int(k))
+	else:
+		var dir: String = main.lp1_dir.path_join("nativePC/ZZPack2")
+		var arcs: Array = []
+		for f in DirAccess.get_files_at(dir):
+			if f.to_lower().begins_with("s9") and f.to_lower().ends_with(".arc"):
+				arcs.append(f)
+		arcs.sort()
+		for f in arcs:
+			map_pick.add_item(f.get_basename())
+			map_pick.set_item_metadata(map_pick.item_count - 1, dir.path_join(f))
+		if arcs.is_empty():
+			note.text = "No LP1 maps found: set the Lost Planet 1 folder in Settings first."
+	_suggest()
 
 func _suggest() -> void:
 	if map_pick.item_count:
-		name_edit.text = "LP1 " + map_pick.get_item_text(map_pick.selected)
+		var t := map_pick.get_item_text(map_pick.selected)
+		name_edit.text = t.get_slice(" (online", 0) + " (edit)" if _lp2() else "LP1 " + t
 	_suggest_folder()
 
 func _suggest_folder() -> void:
-	folder_edit.text = main.maps_dir().path_join(name_edit.text.strip_edges().replace(" ", ""))
+	folder_edit.text = main.maps_dir().path_join(name_edit.text.strip_edges().validate_filename().replace(" ", "") + ".lpme")
 
 func _on_create() -> void:
 	if not map_pick.item_count or name_edit.text.strip_edges() == "":
 		return
 	var out := folder_edit.text.strip_edges()
-	if DirAccess.dir_exists_absolute(out) and not (DirAccess.get_files_at(out).is_empty() and DirAccess.get_directories_at(out).is_empty()):
-		note.text = "%s has files in it: pick a new or empty folder" % out
+	if out.get_extension().to_lower() != "lpme":
+		out += ".lpme"
+	if FileAccess.file_exists(out):
+		note.text = "%s already exists: pick another name" % out.get_file()
 		return
 	hide()
-	main.import_lp1_map(map_pick.get_selected_metadata(), out, name_edit.text.strip_edges())
+	if _lp2():
+		main.import_lp2_map(map_pick.get_selected_metadata(), out, name_edit.text.strip_edges())
+	else:
+		main.import_lp1_map(map_pick.get_selected_metadata(), out, name_edit.text.strip_edges())

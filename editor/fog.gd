@@ -38,10 +38,6 @@ var h_bottom: SpinBox
 var w_type: OptionButton
 var w_amount: SpinBox
 var w_layouts: Array = []
-var box_list: ItemList
-var box_pos: Array = []
-var box_size: Array = []
-var boxes_root: Node3D       # the no-weather boxes in the view
 var _updating := false
 
 const WEATHER := [["", "None"], ["rain", "Rain (Turbulent Jungle)"], ["rain_heavy", "Rain (The Great Outdoors)"],
@@ -125,29 +121,10 @@ func setup(m: Node) -> void:
 		lr.add_child(c)
 		w_layouts.append(c)
 	v.add_child(lr)
-	v.add_child(main._label("No-weather boxes (indoors, under cover):"))
-	box_list = ItemList.new()
-	box_list.custom_minimum_size = Vector2(0, 90)
-	box_list.item_selected.connect(func(_i): _show_box())
-	v.add_child(box_list)
 	var br := HBoxContainer.new()
-	main._button(br, "Add at view", add_box).tooltip_text = "A 10 x 5 x 10 m box where the view points"
-	main._button(br, "Remove", remove_box)
-	main._button(br, "Move to view", move_box).tooltip_text = "Centre the selected box where the view points"
+	main._button(br, "Add weather limiter volume", func(): main.volumes.add_volume("weather")).tooltip_text = \
+		"Less or no weather inside (indoors, under cover; its Weather % in the inspector): a volume where the view points"
 	v.add_child(br)
-	var bg2 := GridContainer.new()
-	bg2.columns = 4
-	for row in [["Centre (m)", box_pos, -5000.0, 5000.0], ["Size (m)", box_size, 0.5, 2000.0]]:
-		bg2.add_child(main._label(row[0]))
-		for a in 3:
-			var sp: SpinBox = main._spin(row[2], row[3], 0.5)
-			sp.prefix = ["X", "Y", "Z"][a]
-			sp.value_changed.connect(func(_v): _on_box_changed())
-			bg2.add_child(sp)
-			row[1].append(sp)
-	v.add_child(bg2)
-	boxes_root = Node3D.new()
-	main.add_child(boxes_root)
 	visibility_changed.connect(func(): if visible: refresh())
 
 func _check(g: GridContainer, t: String, tip: String) -> CheckBox:
@@ -208,14 +185,7 @@ func refresh() -> void:
 	var lay: Array = w.get("layouts", [true, true, true, true])
 	for i in 4:
 		w_layouts[i].button_pressed = bool(lay[i]) if i < lay.size() else true
-	var keep := box_list.get_selected_items()
-	box_list.clear()
-	for i in (w.get("volumes", []) as Array).size():
-		box_list.add_item("Box %d" % (i + 1))
-	if not keep.is_empty() and keep[0] < box_list.item_count:
-		box_list.select(keep[0])
 	_updating = false
-	_show_box()
 	apply_preview()
 
 func weather() -> Dictionary:
@@ -261,116 +231,52 @@ func clear() -> void:
 	refresh()
 
 # ---------------------------------------------------------------- no-weather boxes
-
-func _volumes() -> Array:
-	var e: Dictionary = main.lighting.env()
-	if not (e.get("weather") is Dictionary):
-		e["weather"] = {"type": WEATHER[w_type.selected][0], "amount": w_amount.value}
-	if not (e["weather"].get("volumes") is Array):
-		e["weather"]["volumes"] = []
-	return e["weather"]["volumes"]
-
-func _view_point() -> Vector3:
-	var mp: Vector2 = main.get_viewport().get_visible_rect().size / 2
-	var hit: Dictionary = main._mouse_ray(mp, 1 << (main.LAYER_STAGE - 1))
-	return hit["position"] if hit else main.camera.global_position + (-main.camera.global_transform.basis.z) * 20.0
-
-func add_box() -> void:
-	if main.project_dir == "":
-		return
-	main._push_undo("")
-	var p := _view_point()
-	_volumes().append({"pos": [p.x / main.CM, (p.y + 2.5) / main.CM, p.z / main.CM], "size": [1000.0, 500.0, 1000.0]})
-	refresh()
-	box_list.select(box_list.item_count - 1)
-	_show_box()
-
-func remove_box() -> void:
-	var sel := box_list.get_selected_items()
-	if sel.is_empty():
-		return
-	main._push_undo("")
-	_volumes().remove_at(sel[0])
-	refresh()
-
-func move_box() -> void:
-	var sel := box_list.get_selected_items()
-	if sel.is_empty():
-		return
-	main._push_undo("")
-	var p := _view_point()
-	var v: Dictionary = _volumes()[sel[0]]
-	v["pos"] = [p.x / main.CM, (p.y + float(v["size"][1]) * main.CM / 2) / main.CM, p.z / main.CM]
-	refresh()
-
-func _show_box() -> void:
-	var sel := box_list.get_selected_items()
-	var has := not sel.is_empty()
-	for sp in box_pos + box_size:
-		sp.editable = has
-	if not has:
-		_draw_boxes()
-		return
-	var v: Dictionary = (weather().get("volumes", []) as Array)[sel[0]]
-	_updating = true
-	for a in 3:
-		box_pos[a].value = float(v["pos"][a]) * main.CM
-		box_size[a].value = float(v["size"][a]) * main.CM
-	_updating = false
-	_draw_boxes()
-
-func _on_box_changed() -> void:
-	var sel := box_list.get_selected_items()
-	if _updating or sel.is_empty():
-		return
-	main._push_undo("weatherbox")
-	var v: Dictionary = _volumes()[sel[0]]
-	v["pos"] = box_pos.map(func(sp): return sp.value / main.CM)
-	v["size"] = box_size.map(func(sp): return sp.value / main.CM)
-	_draw_boxes()
-
-func _draw_boxes() -> void:
-	for c in boxes_root.get_children():
-		c.queue_free()
-	var sel := box_list.get_selected_items()
-	var vols: Array = weather().get("volumes", [])
-	for i in vols.size():
-		var v: Dictionary = vols[i]
-		var mi := MeshInstance3D.new()
-		var bm := BoxMesh.new()
-		bm.size = Vector3(float(v["size"][0]), float(v["size"][1]), float(v["size"][2])) * main.CM
-		mi.mesh = bm
-		var m := StandardMaterial3D.new()
-		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		m.cull_mode = BaseMaterial3D.CULL_DISABLED
-		m.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_DISABLED
-		m.albedo_color = Color(0.3, 0.6, 1.0, 0.35 if not sel.is_empty() and sel[0] == i else 0.18)
-		mi.material_override = m
-		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-		mi.position = Vector3(float(v["pos"][0]), float(v["pos"][1]), float(v["pos"][2])) * main.CM
-		boxes_root.add_child(mi)
+# They are volumes now ("weather", volumes.gd); volumes.migrate_weather() moves an older project's boxes over.
 
 # ---------------------------------------------------------------- the editor's view of it
 
 func apply_preview() -> void:
+	# distance fog: Godot's depth fog; height fog: our own overlay (heightfog.gdshader), so each has its colour
 	var we: Environment = main.world_env
 	var f := fog()
-	var dist: bool = f["on"] and float(f["density"]) > 0
-	var low: bool = f["height_on"] and float(f["height_density"]) > 0
-	we.fog_enabled = dist or low
-	if not we.fog_enabled:
+	var dist: bool = f["on"] and float(f["density"]) > 0 and main.view_on("fog")
+	var low: bool = f["height_on"] and float(f["height_density"]) > 0 and main.view_on("fog")
+	_height_overlay(f, low)
+	we.fog_enabled = dist
+	if not dist:
 		return
 	we.fog_mode = Environment.FOG_MODE_DEPTH
-	we.fog_light_color = _rgb(f["colour"] if dist else f["height_colour"])
+	we.fog_light_color = _rgb(f["colour"])
 	we.fog_light_energy = 1.0
 	we.fog_sun_scatter = 0.0
 	we.fog_sky_affect = 0.0
-	we.fog_density = float(f["density"]) if dist else 0.0
+	we.fog_density = float(f["density"])
 	we.fog_depth_begin = maxf(0.0, float(f["start"]) * main.CM)
 	we.fog_depth_end = maxf(we.fog_depth_begin + 1.0, float(f["end"]) * main.CM)
 	we.fog_depth_curve = 1.0
-	# Godot's height fog: exponential below fog_height (one colour for both kinds)
-	we.fog_height = float(f["height_top"]) * main.CM if low else 0.0
-	var depth: float = maxf(0.5, (float(f["height_top"]) - float(f["height_bottom"])) * main.CM)
-	we.fog_height_density = float(f["height_density"]) * 4.0 / depth if low else 0.0
+	we.fog_height_density = 0.0   # the height fog is the overlay's
+
+var _overlay: MeshInstance3D
+
+func _height_overlay(f: Dictionary, on: bool) -> void:
+	if _overlay == null:
+		if not on:
+			return
+		_overlay = MeshInstance3D.new()
+		var q := QuadMesh.new()
+		q.size = Vector2(2, 2)
+		_overlay.mesh = q
+		var mat := ShaderMaterial.new()
+		mat.shader = load("res://heightfog.gdshader")
+		_overlay.material_override = mat
+		_overlay.extra_cull_margin = 16384.0   # never culled: it covers the screen wherever the camera looks
+		_overlay.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		main.camera.add_child(_overlay)
+	_overlay.visible = on
+	if not on:
+		return
+	var m: ShaderMaterial = _overlay.material_override
+	m.set_shader_parameter("colour", _rgb(f["height_colour"]))
+	m.set_shader_parameter("strength", float(f["height_density"]))
+	m.set_shader_parameter("top", float(f["height_top"]) * main.CM)
+	m.set_shader_parameter("bottom", float(f["height_bottom"]) * main.CM)

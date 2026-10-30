@@ -4,11 +4,14 @@ extends Window
 # go into the shown marker set with "placed": true (lp2layout.py: VS / weapons beyond the stock count are copies
 # of the stock records; spawns fill the stock rInitPosSet counts by role, so extra ones are not exported yet).
 
-const KINDS := ["Spawn point", "Weapon pickup", "VS"]
+const KINDS := ["Spawn point", "Weapon pickup", "VS", "Volume"]
 const SPAWNS := [["start", 1, "Free-for-all start"], ["team_a", 20, "Team A (red)"], ["team_b", 21, "Team B (blue)"],
 	["team_c", 22, "Team C"], ["team_d", 23, "Team D"], ["k40", 40, "Spare point (k40: weapons fill these)"]]
 const AIM_PX := 6.0        # drag this far before the mouse aims the marker
 const SNAP_DEG := 15.0
+const SNAP_CM := 50.0
+const HINT := "Click the map to place, drag to aim\n(Ctrl or Snap: 15° steps). Esc stops placing."
+const HINT_VOLUME := "Click the map for a 10 m box, or drag out its floor\n(Ctrl or Snap: 50 cm steps). Esc stops placing."
 
 var main: Node
 var kind_pick: OptionButton
@@ -79,7 +82,7 @@ func setup(m: Node) -> void:
 	all_layouts.button_pressed = true
 	all_layouts.tooltip_text = "The game picks one of the map's 4 layouts per match: also put a copy in the other layouts' matching set (the copies don't follow later moves)"
 	v.add_child(all_layouts)
-	hint = main._label("Click the map to place, drag to aim\n(Ctrl or Snap: 15° steps). Esc stops placing.")
+	hint = main._label(HINT)
 	v.add_child(hint)
 	_load_vs_types()
 	_fill_items()
@@ -109,6 +112,8 @@ func _fill_items() -> void:
 	item_pick.clear()
 	var vs := kind_pick.selected == 2
 	item_pick.visible = not vs
+	all_layouts.visible = kind_pick.selected != 3   # volumes are the map's, not a layout's
+	hint.text = HINT_VOLUME if kind_pick.selected == 3 else HINT
 	vs_list.visible = vs
 	size = Vector2i(maxi(size.x, 560), 560) if vs else Vector2i(size.x, 170)
 	if vs:
@@ -121,6 +126,9 @@ func _fill_items() -> void:
 		1:
 			for w in main.PICKUP_ITEMS:
 				item_pick.add_item(w[1])
+		3:
+			for a in main.volumes.ADD:
+				item_pick.add_item(a[1])
 	item_pick.select(0)
 
 func _fill_vs() -> void:
@@ -186,12 +194,19 @@ func handle(e: InputEvent) -> bool:
 	return false
 
 func _begin(mp: Vector2) -> void:
-	if main.set_index < 0:
+	if main.set_index < 0 and kind_pick.selected != 3:
 		main.log_line("This layout has no marker set to place into.")
 		return
 	var hit: Dictionary = main._mouse_ray(mp, 1 << (main.LAYER_STAGE - 1))
-	if not hit:
-		main.set_status("Nothing under the mouse to place on.")
+	if not hit:   # nothing of the level under the mouse (sky, a gap): 20 m along the view instead of nothing
+		hit = {"position": main.camera.project_ray_origin(mp) + main.camera.project_ray_normal(mp) * 20.0}
+		main.set_status("Nothing under the mouse: placed 20 m out.")
+	if kind_pick.selected == 3:
+		main._push_undo("")
+		_origin = hit["position"]
+		_node = main.volumes.place_volume(main.volumes.ADD[item_pick.selected][0], _origin)
+		_copies = []
+		_press = mp
 		return
 	var d: Variant = _marker_data()
 	if d == null:
@@ -223,6 +238,9 @@ func _aim(mp: Vector2) -> void:
 		return
 	var dir: Vector3 = at - _origin
 	dir.y = 0
+	if _node.has_meta("volume"):
+		_drag_floor(at)
+		return
 	if dir.length() < 0.05:
 		return
 	var yaw := rad_to_deg(atan2(-dir.x, -dir.z))
@@ -232,6 +250,23 @@ func _aim(mp: Vector2) -> void:
 	main._store_marker(_node)
 	_sync_copies()
 
+func _drag_floor(at: Vector3) -> void:
+	# the volume's floor spans the press point to the mouse (at least 1 m a side)
+	var snap: bool = main.snap_toggle.button_pressed or Input.is_key_pressed(KEY_CTRL)
+	var d: Dictionary = _node.get_meta("data")
+	var a: Vector2 = Vector2(_origin.x, _origin.z) / main.CM
+	var b: Vector2 = Vector2(at.x, at.z) / main.CM
+	if snap:
+		a = a.snapped(Vector2(SNAP_CM, SNAP_CM))
+		b = b.snapped(Vector2(SNAP_CM, SNAP_CM))
+	var lo := Vector2(minf(a.x, b.x), minf(a.y, b.y))
+	var hi := Vector2(maxf(a.x, b.x), maxf(a.y, b.y))
+	var size := (hi - lo).max(Vector2(100, 100))
+	d["size"] = [size.x, d["size"][1], size.y]
+	d["pos"] = [(lo.x + hi.x) / 2, _origin.y / main.CM, (lo.y + hi.y) / 2]
+	main._place(_node)
+	main.volumes.update_marker(_node)
+
 func _sync_copies() -> void:
 	var d: Dictionary = _node.get_meta("data")
 	for c in _copies.slice(1):
@@ -239,6 +274,13 @@ func _sync_copies() -> void:
 		c["yaw"] = d["yaw"]
 
 func _end() -> void:
+	if _node.has_meta("volume"):
+		var v := _node
+		_node = null
+		main._rebuild_outliner()
+		main.select([v])
+		main.log_line("Placed %s." % main.volumes.label(v.get_meta("data")))
+		return
 	main._store_marker(_node)
 	_sync_copies()
 	var n := _node

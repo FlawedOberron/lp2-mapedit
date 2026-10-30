@@ -10,7 +10,8 @@ material's colour map (_BM) as tex/*.png. Rebuilt only when the project's stage 
 (PROJECT/.preview/stage.key). Prints '@progress F TEXT' lines (0..1) for the editor's progress bar.
 write_glb is kept for a one-file view of a stage (stage_meshes -> any glTF viewer).
 """
-import argparse, hashlib, io, json, os, struct, subprocess, sys, tempfile
+import argparse, hashlib, io, json, os, shutil, struct, subprocess, sys, tempfile
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -195,19 +196,25 @@ def write_geo(prev, S, per_mesh, n, tex_files, max_tex, log=print):
     tdir = os.path.join(prev, "tex")
     os.makedirs(tdir, exist_ok=True)
     mats, tex_bytes = [], 0
-    for k, raw in enumerate(S["materials"]):
-        print(f"@progress {0.75 + 0.2 * (k + 1) / nmat:.3f} preview textures", flush=True)
+    names = []
+    for raw in S["materials"]:
         slot = struct.unpack_from("<I", raw, 12)[0]
-        tn = S["textures"][slot - 1] if 0 < slot <= len(S["textures"]) else None
+        names.append(S["textures"][slot - 1] if 0 < slot <= len(S["textures"]) else None)
+    # the colour maps as PNGs, made side by side (each is a tex2dds.py run)
+    todo = sorted({tn for tn in names if tn and tn.lower() in tex_files
+                   and not os.path.exists(os.path.join(prev, "tex", tn.split("\\")[-1] + ".png"))})
+    print("@progress 0.75 preview textures", flush=True)
+    with ThreadPoolExecutor(max_workers=os.cpu_count() or 4) as pool:
+        made = dict(zip(todo, pool.map(lambda tn: png(tex_files[tn.lower()], max_tex), todo)))
+    for tn, data in made.items():
+        if data:
+            open(os.path.join(prev, "tex", tn.split("\\")[-1] + ".png"), "wb").write(data)
+    for k, (raw, tn) in enumerate(zip(S["materials"], names)):
         png_rel = None
         if tn and tn.lower() in tex_files:
             png_rel = "tex/" + tn.split("\\")[-1] + ".png"
             if not os.path.exists(os.path.join(prev, png_rel)):
-                data = png(tex_files[tn.lower()], max_tex)
-                if data:
-                    open(os.path.join(prev, png_rel), "wb").write(data)
-                else:
-                    png_rel = None
+                png_rel = None
         mats.append(dict(tex=png_rel, name=tn.split("\\")[-1] if tn else None, textures=slot_textures(S, raw, tex_files)))
     tex_bytes = sum(os.path.getsize(f) for f in tex_files.values())
     tree = lp2pieces.default_tree(S, per_mesh, n)
@@ -245,10 +252,15 @@ def build(game, folder, max_tex=1024, log=print):
     tmpl = os.path.join(prev, "online00.rModel")
     open(tmpl, "wb").write(next(d for n, d in stock["rModel"] if lp2mapc.base(n).lower() == "online00"))
     stage = os.path.join(prev, "stage")
-    log("stage model (lp2stage.py)")
-    lp2mapc.tool("lp2stage.py", "--template", tmpl, "--out", stage, "--tex-dir", lp2mapc.STAGE_DIR,
-                 "--light", p["stage"].get("light_scale", 0.5), "--balance", p["stage"].get("light_balance", 1.0),
-                 *[lp2project.path(folder, m) for m in p["stage"]["lp1_models"]], progress=(0.02, 0.6))
+    if p["stage"].get("lp2_stage"):   # an LP2 map's, already converted (lp2project import-lp2)
+        log("stage model: LP2 online %s" % p["stage"].get("lp2_map", "?"))
+        shutil.rmtree(stage, ignore_errors=True)
+        shutil.copytree(lp2project.path(folder, p["stage"]["lp2_stage"]), stage)
+    else:
+        log("stage model (lp2stage.py)")
+        lp2mapc.tool("lp2stage.py", "--template", tmpl, "--out", stage, "--tex-dir", lp2mapc.STAGE_DIR,
+                     "--light", p["stage"].get("light_scale", 0.5), "--balance", p["stage"].get("light_balance", 1.0),
+                     *[lp2project.path(folder, m) for m in p["stage"]["lp1_models"]], progress=(0.02, 0.6))
     model = os.path.join(stage, *lp2mapc.STAGE_DIR.split("\\"), "online00.rModel")
     tex_files = {}
     for d, _, fs in os.walk(stage):
