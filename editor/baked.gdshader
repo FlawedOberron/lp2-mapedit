@@ -10,6 +10,7 @@
 shader_type spatial;
 render_mode cull_disabled, ambient_light_disabled, specular_disabled;
 
+uniform bool cull_back = false;   // back faces dropped (the preview's triangles are wound to their normals)
 uniform sampler2D albedo : source_color, filter_linear_mipmap, repeat_enable;
 uniform bool has_texture = false;
 uniform float bake_scale = 4.0;
@@ -35,6 +36,9 @@ void vertex() {
 }
 
 void fragment() {
+	if (cull_back && !FRONT_FACING) {
+		discard;
+	}
 	vec3 tex = has_texture ? texture(albedo, UV).rgb : vec3(0.7);
 	vec3 light;
 	if (use_bake && c0.a > 0.5) {

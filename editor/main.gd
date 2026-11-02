@@ -64,7 +64,7 @@ const ICON_ADD_LIGHT := '<svg xmlns="http://www.w3.org/2000/svg" width="20" heig
 const ICON_FOG := '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" stroke="#e8e8e8" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 6c2-1.6 3.5-1.6 5 0s3 1.6 5 0 3.5-1.6 5 0M2.5 10.5c2-1.6 3.5-1.6 5 0s3 1.6 5 0 3.5-1.6 5 0M2.5 15c2-1.6 3.5-1.6 5 0s3 1.6 5 0 3.5-1.6 5 0"/></svg>'
 const ICON_POST := '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" fill="none" stroke="#e8e8e8" stroke-width="1.6" stroke-linejoin="round"><rect x="2.5" y="5" width="12" height="10" rx="1.5"/><path d="M14.5 8.5l3.5-2v7l-3.5-2z"/><circle cx="8.5" cy="10" r="2.3" fill="#e8e8e8" fill-opacity="0.35"/></svg>'
 
-const CATEGORIES := ["Spawns & game logic", "Pickups", "Vehicles", "Level geometry", "Lights", "Volumes"]
+const CATEGORIES := ["Spawns & game logic", "Pickups", "Vehicles", "Level geometry", "Lights", "Volumes", "Terrain"]
 const LAYER_STAGE := 1
 const LAYER_MARKERS := 2
 const LAYER_COLLISION := 3   # View collision's triangles: clicking one selects the piece it belongs to
@@ -129,6 +129,7 @@ var browser: Window
 var mesh_builder: Window
 var lighting: Window
 var fog_win: Window
+var scripts_win: Window   # scripts.gd: visual scripting (K)
 var settings_win: Window
 var new_win: Window
 var placer: Window   # place.gd: click-and-drag placing of spawns, weapons, VS
@@ -145,6 +146,7 @@ var browser_group := ""
 var marker_tint: StandardMaterial3D   # selection tint on marker models (fainter than the stage's: models stack many layers)
 var insp_title: Label
 var insp_name: LineEdit
+var insp_tag: LineEdit     # script name: scripts find the object as a marker by it (object_tag)
 var insp_pos: Array = []
 var insp_rot: Array = []
 var insp_scale: Array = []
@@ -166,6 +168,7 @@ var lowgrav_on: CheckBox        # Map info: environment jump_packs / underwater 
 var underwater_on: CheckBox
 var gravity_spin: SpinBox
 var volumes: Node               # volumes.gd: kill / gravity / post-process boxes
+var terrain: Node               # terrain.gd: terrain areas (height grids)
 var vrow_add: HBoxContainer     # Map info row the Add volume menu goes in
 var pickup_row: Control   # explicit weapon pickup
 var pickup_pick: OptionButton
@@ -248,7 +251,7 @@ func _saved_state() -> String:
 	# what Save writes; unsaved changes = it differs from the last save / open
 	if project.is_empty():
 		return ""
-	return JSON.stringify(project) + JSON.stringify(layout) + (JSON.stringify(geometry.to_json()) if geometry.get_child_count() else "")
+	return JSON.stringify(project) + JSON.stringify(layout) + (JSON.stringify(geometry.to_json()) if geometry.get_child_count() else "") + str(terrain.rev)
 
 func _ready() -> void:
 	get_tree().auto_accept_quit = false
@@ -406,7 +409,7 @@ func _build_ui() -> void:
 	var bars := VBoxContainer.new()
 	root.add_child(_panel(bars))
 	var bar := _scroll_row(bars)
-	_button(bar, "Import map from LP/LP2...", func(): new_win.open()).tooltip_text = "A new map from one of Lost Planet 1's or Lost Planet 2's maps"
+	_button(bar, "New map...", func(): new_win.open()).tooltip_text = "A new map: empty (a flat ground to build on) or imported from one of Lost Planet 1's or Lost Planet 2's maps"
 	_button(bar, "Open...", _on_open)
 	_button(bar, "Save", save_project)
 	_button(bar, "Save as...", _on_save_as)
@@ -417,6 +420,7 @@ func _build_ui() -> void:
 	_button(bar, "Lighting (L)", toggle_lighting).tooltip_text = "The sun, sky light, sky dome and placed point / spot lights"
 	_button(bar, "Map info (I)", toggle_info).tooltip_text = "Name, size, water and kill floor heights, physics rebuild"
 	_button(bar, "Fog & weather (H)", toggle_fog).tooltip_text = "Distance fog, low-lying height fog, rain / snow / ash and no-weather boxes"
+	_button(bar, "Scripts (K)", toggle_scripts).tooltip_text = "Visual scripting: events (volumes entered, timers) switch volumes' effects during the match (experimental, xlive mod)"
 	_button(bar, "Place (T)", toggle_placer).tooltip_text = "Place spawn points, weapons, VS and volumes: click the map to put one down, drag to aim it (volumes: drag out the floor)"
 	_button(bar, "Settings", toggle_settings).tooltip_text = "The game folders and the asset library folder"
 	status = _label("No project open")
@@ -558,6 +562,13 @@ func _build_ui() -> void:
 	insp_name.text_submitted.connect(func(_t): _on_rename())
 	insp_name.focus_exited.connect(_on_rename)
 	right.add_child(insp_name)
+	insp_tag = LineEdit.new()
+	insp_tag.placeholder_text = "Script name (none)"
+	insp_tag.tooltip_text = "Scripts find it by this name as a marker (Get marker / Find markers with wildcards: crate_* finds " \
+		+ "crate_1, crate_2...): its position and facing (pieces: the floor centre of their box). Objects may share a name"
+	insp_tag.text_submitted.connect(func(_t): _on_tag())
+	insp_tag.focus_exited.connect(_on_tag)
+	right.add_child(insp_tag)
 	insp_pos = _vec_row(right, "Position (cm)", -1e6, 1e6, 1.0, null)
 	insp_rot = _vec_row(right, "Rotation (deg)", -360, 360, 0.5, null)
 	insp_scale = _vec_row(right, "Scale", 0.01, 100, 0.01, "scale")
@@ -820,6 +831,11 @@ void fragment() {
 	add_child(volumes)
 	volumes.setup(self, type_box.get_parent())
 	volumes.add_menu(vrow_add)
+	terrain = Node.new()
+	terrain.set_script(load("res://terrain.gd"))
+	add_child(terrain)
+	terrain.setup(self, type_box.get_parent())
+	terrain.add_button(vrow_add)
 	settings_win = Window.new()
 	settings_win.set_script(load("res://settings.gd"))
 	add_child(settings_win)
@@ -837,6 +853,10 @@ void fragment() {
 	fog_win.set_script(load("res://fog.gd"))
 	add_child(fog_win)
 	fog_win.setup(self)
+	scripts_win = Window.new()
+	scripts_win.set_script(load("res://scripts.gd"))
+	add_child(scripts_win)
+	scripts_win.setup(self)
 	placer = Window.new()
 	placer.set_script(load("res://place.gd"))
 	add_child(placer)
@@ -844,7 +864,7 @@ void fragment() {
 	# Place is its own OS window: while it's open, the view takes the focus back as soon as the mouse is over it, so
 	# the first click there places instead of only focusing the editor
 	get_window().mouse_entered.connect(func(): if placer.visible and not get_window().has_focus(): get_window().grab_focus())
-	for w: Window in [info_win, browser, mesh_builder, lighting, settings_win, new_win, fog_win, placer]:
+	for w: Window in [info_win, browser, mesh_builder, lighting, settings_win, new_win, fog_win, placer, scripts_win]:
 		w.window_input.connect(_on_tool_window_input.bind(w))   # Ctrl+S saves from any of them too
 	lighting_dialog = FileDialog.new()
 	lighting_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
@@ -927,6 +947,147 @@ func _send_mouse(at: Vector2, pressed: Variant, ctrl := false, shift := false) -
 	ev.shift_pressed = shift
 	Input.parse_input_event(ev)
 	await get_tree().process_frame
+
+func _terrain_test() -> void:
+	terrain.add_terrain()
+	var n: Node3D = selection[0]
+	var d: Dictionary = n.get_meta("data")
+	var h: PackedFloat32Array = terrain.heights[d["id"]]
+	h[5 * 33 + 7] = 500.0   # a 5 m spike at cell (7, 5): it must stay put in the world when the near side grows
+	terrain._set_heights(d, h)
+	terrain.update_marker(n)
+	var spike := n.global_position + Vector3(7, 0, 5) * float(d["cell"]) * CM
+	var w: float = 32 * float(d["cell"]) * CM
+	camera.global_position = n.global_position + Vector3(w / 2, w * 0.9, w * 1.6)
+	camera.look_at(n.global_position + Vector3(w / 2, 0, w / 2))
+	await get_tree().create_timer(0.3).timeout
+	var o := n.global_position
+	for side in [[Vector3(w, 0.0, w / 2), Vector3(16, 0, 0), "+x"], [Vector3(w / 2, 0.0, 0), Vector3(0, 0, -12), "-z"]]:
+		var p := camera.unproject_position(o + side[0])
+		var q := camera.unproject_position(o + side[0] + side[1])
+		var fh := _face_at(p)
+		print("terrain-test: side under the mouse: ", fh.get("axis", "none"), " sign ", fh.get("sign", 0), ", gizmo ", gizmo.hit(p), ", placing ", placer.placing(), ", camera ", camera.global_position, ", screen ", p)
+		await _send_mouse(p, true, true)
+		print("terrain-test: face_press ", not face_press.is_empty())
+		for k in 6:
+			await _send_mouse(p.lerp(q, (k + 1) / 6.0), null, true)
+		await _send_mouse(q, false, true)
+		print("terrain-test: Ctrl+drag %s: cells %s, pos %s" % [side[2], d["cells"], d["pos"]])
+		o = n.global_position
+	var g: Vector2i = terrain.dims(d)
+	var nh: PackedFloat32Array = terrain.heights[d["id"]]
+	var c := Vector2i(roundi((spike.x - n.global_position.x) / (float(d["cell"]) * CM)), roundi((spike.z - n.global_position.z) / (float(d["cell"]) * CM)))
+	print("terrain-test: spike still at its world spot: ", nh[c.y * (g.x + 1) + c.x] == 500.0)
+	var before: Array = (d["cells"] as Array).duplicate()
+	undo()
+	var nn: Node3D = markers_root.get_children().filter(func(m): return m.has_meta("terrain"))[0]
+	print("terrain-test: undo: cells ", before, " -> ", nn.get_meta("data")["cells"])
+	redo()
+	nn = markers_root.get_children().filter(func(m): return m.has_meta("terrain"))[0]
+	print("terrain-test: redo: cells ", nn.get_meta("data")["cells"], ", outliner: ", terrain.label(nn.get_meta("data")))
+	save_project()
+	var dd: Dictionary = nn.get_meta("data")
+	var f := project_dir.path_join(dd["heights"])
+	var gg: Vector2i = terrain.dims(dd)
+	print("terrain-test: saved %s: %d bytes (want %d), unsaved after save: %s" % [dd["heights"], FileAccess.get_file_as_bytes(f).size(), (gg.x + 1) * (gg.y + 1) * 4, _saved_state() != saved_state])
+	# edit mode: strokes through the real input path
+	terrain.start_edit(nn)
+	await get_tree().process_frame
+	var others := markers_root.get_children().filter(func(m): return m != nn and m.visible).size()
+	print("terrain-test: edit mode: other markers visible %d, gizmo %s, toolbar %s" % [others, gizmo.visible, terrain.bar_layer.visible])
+	var c0: Vector3 = nn.global_position + Vector3(gg.x, 0, gg.y) * float(dd["cell"]) * CM * 0.5
+	camera.global_position = c0 + Vector3(0, 45, 35)
+	camera.look_at(c0)
+	await get_tree().process_frame
+	var spot := func(off: Vector3) -> Vector2: return camera.unproject_position(c0 + off)
+	var stroke := func(at: Vector2, secs: float, shift := false) -> void:
+		await _send_mouse(at, true, false, shift)
+		await get_tree().create_timer(secs).timeout
+		await _send_mouse(at, false, false, shift)
+	var h0: float = terrain.height_at(nn, (c0 - nn.global_position).x, (c0 - nn.global_position).z)
+	terrain._set_tool("height")
+	await stroke.call(spot.call(Vector3.ZERO), 0.5)
+	var h1: float = terrain.height_at(nn, (c0 - nn.global_position).x, (c0 - nn.global_position).z)
+	print("terrain-test: height stroke: centre %.2f m -> %.2f m" % [h0, h1])
+	terrain._set_tool("smooth")
+	await stroke.call(spot.call(Vector3.ZERO), 0.5)
+	print("terrain-test: smooth stroke: centre -> %.2f m" % terrain.height_at(nn, (c0 - nn.global_position).x, (c0 - nn.global_position).z))
+	terrain._set_tool("paint")
+	terrain.layer = 2
+	await stroke.call(spot.call(Vector3(-14, 0, 6)), 0.6)
+	var cellc: float = float(dd["cell"]) * CM
+	var pc := (c0 + Vector3(-14, 0, 6) - nn.global_position) / cellc
+	print("terrain-test: paint layer 2: cell there shows layer ", terrain.cell_layer(terrain.weights[dd["id"]], gg, int(pc.x), int(pc.z)))
+	terrain.layer = 3
+	terrain.fill_slope(30.0, 90.0)
+	terrain._set_tool("holes")
+	await stroke.call(spot.call(Vector3(14, 0, -6)), 0.2)
+	var nholes := 0
+	for v in (terrain.holes[dd["id"]] as PackedByteArray):
+		nholes += v
+	print("terrain-test: holes stroke: %d hole cells" % nholes)
+	undo()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	var nh2 := 0
+	for v in (terrain.holes[dd["id"]] as PackedByteArray):
+		nh2 += v
+	print("terrain-test: undo the holes: %d hole cells, still editing %s" % [nh2, terrain.editing()])
+	redo()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	# add ground past the +x edge: the grid grows; only the brushed cells become ground
+	terrain._set_tool("holes")
+	terrain.hole_add = true
+	var tn: Node3D = terrain.edit_node
+	var td: Dictionary = tn.get_meta("data")
+	var before_cells: Array = (td["cells"] as Array).duplicate()
+	var edge_x: float = tn.global_position.x + terrain.dims(td).x * float(td["cell"]) * CM
+	terrain.brush_size = 4.0
+	await stroke.call(camera.unproject_position(Vector3(edge_x + 6.0, c0.y, c0.z)), 0.3)
+	var tg: Vector2i = terrain.dims(td)
+	var nh3 := 0
+	for v in (terrain.holes[td["id"]] as PackedByteArray):
+		nh3 += v
+	var px := int((edge_x + 6.0 - tn.global_position.x) / (float(td["cell"]) * CM))
+	var pz := int((c0.z - tn.global_position.z) / (float(td["cell"]) * CM))
+	print("terrain-test: add ground past the edge: cells %s -> %s, hole cells %d, brushed cell is ground %s" % [before_cells, td["cells"], nh3, terrain.holes[td["id"]][pz * tg.x + px] == 0])
+	undo()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	print("terrain-test: undo the growth: cells ", terrain.edit_node.get_meta("data")["cells"] if terrain.edit_node else "not editing")
+	redo()
+	await get_tree().process_frame
+	await get_tree().process_frame
+	terrain.hole_add = false
+	terrain.brush_size = 8.0
+	terrain._set_tool("paint")
+	terrain._show_layer()
+	camera.global_position = c0 + Vector3(0, 75, 8)
+	camera.look_at(c0)
+	var ed: Dictionary = terrain.edit_node.get_meta("data")   # a slope rule (layer 3 on 8-90 degrees) and smooth blend
+	ed["layers"] = [{"material": "", "tile": 4.0}, {"material": "", "tile": 4.0}, {"material": "", "tile": 4.0, "slope": {"on": true, "min": 8.0, "max": 90.0, "soft": 4.0}}]
+	ed["blend"] = true
+	ed["layers"][2]["damage"] = {"player": 0.0, "vs": 10.0, "player_kill": true}   # lava on the slopes (a test)
+	terrain.update_marker(terrain.edit_node)
+	terrain._materials_to_shader(terrain.edit_node)
+	var eg: Vector2i = terrain.dims(ed)
+	terrain._layer_map(terrain.edit_node, Rect2i(0, 0, eg.x, eg.y), true)
+	terrain._show_layer()
+	terrain.show_inspector(selection)
+	print("terrain-test: smooth blend + slope rule: ", terrain.info.text.replace("\n", " / "))
+	world_env.fog_enabled = false   # the map's fog washes out a view from this high (the screenshot only)
+	world_env.volumetric_fog_enabled = false
+	_mouse_move_test(spot.call(Vector3(-4, 0, 2)))
+	await get_tree().create_timer(0.5).timeout
+	save_project()
+	print("terrain-test: saved: w8 %d bytes, hole %d bytes" % [FileAccess.get_file_as_bytes(project_dir.path_join("terrain/t1.w8")).size(), FileAccess.get_file_as_bytes(project_dir.path_join("terrain/t1.hole")).size()])
+
+func _mouse_move_test(at: Vector2) -> void:
+	var ev := InputEventMouseMotion.new()
+	ev.position = at
+	ev.global_position = at
+	Input.parse_input_event(ev)
 
 func _input_test() -> void:
 	var vols := func() -> int: return markers_root.get_children().filter(func(n): return n.has_meta("volume")).size()
@@ -1187,6 +1348,16 @@ func import_lp2_map(stock: int, file: String, name: String) -> void:
 	log_line("New map: Lost Planet 2 online %02d -> %s" % [stock, file])
 	run_tool("lp2project.py", ["import-lp2", str(stock), ws, "--name", name, "--game", game, "--library", library_dir], func(): _imported(ws, file))
 
+func new_empty_map(file: String, name: String) -> void:
+	# a new .lpme with nothing but a flat ground and spawns (lp2project.py new)
+	var ws: String = Lpme.workspace(file)
+	DirAccess.make_dir_recursive_absolute(ws)
+	Lpme.clear(ws, false)
+	DirAccess.make_dir_recursive_absolute(file.get_base_dir())
+	set_status("Creating an empty map...")
+	log_line("New map: empty -> %s" % file)
+	run_tool("lp2project.py", ["new", ws, "--name", name, "--game", game], func(): _imported(ws, file))
+
 func _imported(ws: String, file: String) -> void:
 	var err: Error = Lpme.pack(ws, file)
 	if err != OK:
@@ -1225,6 +1396,7 @@ func open_project(dir: String) -> void:
 	project_file = ""
 	project = _ints(p)
 	library.load_imports(dir)
+	terrain.load_all()
 	var lay: Variant = _read_json(dir.path_join(project["layout"]["file"]))
 	layout = _ints(lay) if lay is Dictionary else {"sets": []}
 	if screenshot_path == "":   # test runs (--screenshot) don't become the project the editor reopens
@@ -1254,6 +1426,7 @@ func open_project(dir: String) -> void:
 	lighting.presets = {}
 	lighting.apply_preview()
 	fog_win.refresh()
+	scripts_win.refresh()
 	DisplayServer.window_set_title("LP2 Map Editor - %s" % project["info"].get("name", dir))
 	log_line("Opened %s (%d marker sets)" % [dir, layout["sets"].size()])
 	col_toggle.set_pressed_no_signal(false)
@@ -1285,6 +1458,12 @@ func save_project() -> void:
 		var g := FileAccess.open(geometry_path(), FileAccess.WRITE)
 		g.store_string(JSON.stringify(geometry.to_json(), " "))
 		g.close()
+	terrain.save_all()
+	var tags := script_tags()
+	if tags.is_empty():
+		project.erase("script_tags")
+	else:
+		project["script_tags"] = tags
 	for w in [["project.json", project], [project["layout"]["file"], layout]]:
 		var f := FileAccess.open(project_dir.path_join(w[0]), FileAccess.WRITE)
 		if f == null:
@@ -1820,9 +1999,9 @@ func _load_collision(path: String) -> void:
 		var c := Vector3(raw[t * 9 + 6], raw[t * 9 + 7], raw[t * 9 + 8]) * CM
 		var w := (b - a).cross(c - a).normalized()
 		var lift := w * 0.03   # a little off the surface it lies on, so it doesn't flicker against the stage
-		pos[t * 3] = a + lift
-		pos[t * 3 + 1] = b + lift
-		pos[t * 3 + 2] = c + lift
+		pos[t * 3] = a + lift   # wound clockwise for Godot (collision is counter-clockwise about its normal w)
+		pos[t * 3 + 1] = c + lift
+		pos[t * 3 + 2] = b + lift
 		nrm[t * 3] = w
 		nrm[t * 3 + 1] = w
 		nrm[t * 3 + 2] = w
@@ -1907,6 +2086,113 @@ func _screenshot() -> void:
 		await get_tree().create_timer(4.0).timeout
 	if OS.get_cmdline_user_args().has("--input-test"):   # placing / gizmo / Ctrl+face through the real input path
 		await _input_test()
+	if OS.get_cmdline_user_args().has("--terrain-test"):   # add a terrain, Ctrl+drag its sides, undo / redo, save
+		await _terrain_test()
+	if OS.get_cmdline_user_args().has("--damage-test"):   # a lava volume, its inspector
+		_push_undo("")
+		var dv: Node3D = volumes.place_volume("damage", Vector3(83, 30.4, -126))
+		_after_structure([dv])
+		print("damage-test: ", volumes.label(dv.get_meta("data")), " ", dv.get_meta("data").get("damage"))
+		camera.global_position = Vector3(83, 45, -110)
+		camera.look_at(Vector3(83, 30, -126))
+	if OS.get_cmdline_user_args().has("--script-test"):   # a trigger turns a lava volume on and off; a timer logs
+		_push_undo("")
+		var trig: Node3D = volumes.place_volume("weather", Vector3(83, 30.4, -126))
+		var lava: Node3D = volumes.place_volume("damage", Vector3(95, 30.4, -126))
+		_after_structure([trig])
+		toggle_scripts()
+		scripts_win._add_at = Vector2(20, 20)
+		scripts_win.add_node("enter")
+		select([lava])
+		scripts_win._add_at = Vector2(330, 20)
+		scripts_win.add_node("volume")
+		scripts_win._add_at = Vector2(20, 260)
+		scripts_win.add_node("timer")
+		scripts_win._add_at = Vector2(330, 260)
+		scripts_win.add_node("log")
+		var ns: Array = scripts_win.data()["nodes"]
+		ns[2]["autostart"] = true
+		scripts_win._on_connect(ns[0]["id"], 0, ns[1]["id"], 0)   # entered -> on
+		scripts_win._on_connect(ns[0]["id"], 1, ns[1]["id"], 1)   # left -> off
+		scripts_win._on_connect(ns[2]["id"], 0, ns[3]["id"], 0)   # tick -> log
+		ns[1]["start_off"] = true
+		# a random-time timer counting up; at 3 a fade of the lava's VS damage to roll x 10
+		scripts_win._add_at = Vector2(640, 20)
+		scripts_win.add_node("math")
+		scripts_win._add_at = Vector2(640, 250)
+		scripts_win.add_node("compare")
+		scripts_win._add_at = Vector2(950, 20)
+		scripts_win.add_node("random")
+		select([lava])
+		scripts_win._add_at = Vector2(950, 250)
+		scripts_win.add_node("setvalue")
+		ns[2]["max_seconds"] = 9.0
+		ns[3]["text"] = "count {count}"
+		ns[7]["setting"] = "damage_vs"
+		ns[7]["a"] = "roll"
+		ns[7]["seconds"] = 2.0
+		ns[6]["b"] = "8"
+		scripts_win._on_connect(ns[3]["id"], 0, ns[4]["id"], 0)   # log -> math
+		scripts_win._on_connect(ns[4]["id"], 0, ns[5]["id"], 0)   # math -> compare
+		scripts_win._on_connect(ns[5]["id"], 0, ns[6]["id"], 0)   # yes -> random
+		scripts_win._on_connect(ns[6]["id"], 0, ns[7]["id"], 0)   # random -> set value
+		# players who enter the trigger join a list; each tick the gone / dead leave it and the rest take 10% damage
+		ns[0]["player"] = "who"
+		for t in ["list", "listremove", "foreach", "playeract", "loop"]:
+			scripts_win._add_at = Vector2(20 + 310 * (ns.size() - 8), 520)
+			scripts_win.add_node(t)
+		scripts_win._on_connect(ns[0]["id"], 0, ns[8]["id"], 0)   # entered -> add
+		scripts_win._on_connect(ns[2]["id"], 0, ns[9]["id"], 0)   # tick -> remove where
+		scripts_win._on_connect(ns[9]["id"], 0, ns[10]["id"], 0)  # -> for each
+		scripts_win._on_connect(ns[10]["id"], 0, ns[11]["id"], 0) # each -> damage
+		ns[11]["player"] = "each"
+		var mk: Node3D = volumes.place_volume("marker", Vector3(83, 30.4, -110))
+		volumes.duplicate_volumes([mk])
+		scripts_win._add_at = Vector2(20 + 310 * 5, 520)
+		scripts_win.add_node("findmarkers")
+		ns[13]["text"] = "marker_*"
+		scripts_win._add_at = Vector2(20 + 310 * 6, 520)
+		scripts_win.add_node("spawn")
+		ns[14]["items"] = [0x15, 0x41]
+		scripts_win._on_connect(ns[10]["id"], 1, ns[14]["id"], 0)   # done -> spawn
+		scripts_win._add_at = Vector2(20 + 310 * 7, 520)
+		scripts_win.add_node("teleport")
+		scripts_win._on_connect(ns[14]["id"], 0, ns[15]["id"], 0)   # spawned -> teleport
+		for t in ["getpos", "vector", "switch", "gate"]:
+			scripts_win._add_at = Vector2(20 + 310 * (ns.size() - 8), 520)
+			scripts_win.add_node(t)
+		scripts_win.refresh()
+		print("script-test: markers ", volumes.volumes().filter(func(v): return v.has("marker")).map(func(v): return v["marker"]))
+		scripts_win.refresh()
+		var pc: Array = geometry.pieces()
+		if pc:   # eyedropper: a piece becomes a Get marker node and gets a script name
+			scripts_win.pick_button.button_pressed = true
+			scripts_win.picked(pc[0])
+			scripts_win.pick_button.button_pressed = true
+			scripts_win.picked(pc[0])   # again: keeps its name
+			print("script-test: picked ", object_tag(pc[0]), " picking ", scripts_win.picking, " tags ", JSON.stringify(script_tags()))
+		print("script-test: ", JSON.stringify(scripts_win.data()))
+		print("script-test: problems ", scripts_win.problems())
+		await get_tree().create_timer(0.5).timeout
+		undo()
+		print("script-test: after undo ", (project.get("scripts", {}) as Dictionary).get("nodes", []).size(), " nodes")
+		redo()
+		print("script-test: after redo ", (project.get("scripts", {}) as Dictionary).get("nodes", []).size(), " nodes, links ", project["scripts"]["links"].size())
+		await get_tree().create_timer(0.5).timeout
+		scripts_win.get_texture().get_image().save_png(screenshot_path.get_basename() + "-scripts.png")
+	if OS.get_cmdline_user_args().has("--set-test"):   # Place set of an imported split set (imports/yard: lp2mesh --split)
+		mesh_builder.refresh()
+		mesh_builder.select_key("imp_yard_crate")
+		camera.global_position = Vector3(0, 0, 0) + Vector3(83, 45, -110)
+		camera.look_at(Vector3(83, 30, -126))
+		await get_tree().create_timer(0.3).timeout
+		mesh_builder.place_set()
+		var gp: Node3D = selection[0]
+		print("set-test: placed ", gp.get_meta("tree")["name"], " at ", gp.position, ", parts ", (gp.get_meta("tree").get("children", []) as Array).size())
+		for c in gp.get_meta("tree").get("children", []):
+			var m: Dictionary = geometry.members_of(c)[0]
+			print("set-test:   ", c["name"], " ", (m["L"] as Transform3D).origin - gp.position, " x axis ", (m["L"] as Transform3D).basis.x)
+		frame_selected()
 	var place_volume := OS.get_cmdline_user_args().has("--place-volume")
 	if OS.get_cmdline_user_args().has("--place") or place_volume:   # a VS put down mid-screen, aimed to the right
 		placer.popup()                                              # (--place-volume: a post volume dragged out)
@@ -2032,6 +2318,7 @@ func show_set(i: int) -> void:
 			_add_marker(o, true)
 	lighting.add_markers()
 	volumes.add_markers()
+	terrain.add_markers()
 	_rebuild_outliner()
 	_update_stats()
 
@@ -2055,9 +2342,11 @@ func _marker_label(d: Dictionary, is_object: bool) -> String:
 
 func _category(n: Node3D) -> int:
 	if _is_wall(n):
-		return 6
+		return 7
 	if n.get_parent() == geometry:
 		return 3
+	if n.has_meta("terrain"):
+		return 6
 	if n.has_meta("volume"):
 		return 5
 	if n.has_meta("light"):
@@ -2222,6 +2511,9 @@ func _store_marker(n: Node3D) -> void:
 		lighting.update_marker(n)
 	elif n.has_meta("volume"):
 		volumes.update_marker(n)
+	elif n.has_meta("terrain"):
+		d["yaw"] = 0.0   # terrains are never turned
+		_place(n)
 
 func _is_marker(n: Node3D) -> bool:
 	return n.get_parent() == markers_root
@@ -2235,7 +2527,7 @@ func _rebuild_outliner() -> void:
 	outliner.clear()
 	var root := outliner.create_item()
 	cat_items = []
-	var nodes: Array = [[], [], [], [], [], [], []]
+	var nodes: Array = [[], [], [], [], [], [], [], []]
 	for n in markers_root.get_children():
 		nodes[_category(n)].append(n)
 	nodes[3] = geometry.get_children()
@@ -2253,7 +2545,7 @@ func _rebuild_outliner() -> void:
 				ch.set_text(0, geometry.label(n))
 			else:
 				var d: Dictionary = n.get_meta("data")
-				ch.set_text(0, volumes.label(d) if n.has_meta("volume") else lighting.label(d) if c == 4 else _marker_label(d, n.get_meta("object")))
+				ch.set_text(0, volumes.label(d) if n.has_meta("volume") else terrain.label(d) if n.has_meta("terrain") else lighting.label(d) if c == 4 else _marker_label(d, n.get_meta("object")))
 				var col: Color = ((n.get_child(0) as MeshInstance3D).material_override as StandardMaterial3D).albedo_color.lightened(0.3)
 				col.a = 1.0   # volumes' boxes are see-through
 				ch.set_custom_color(0, col)
@@ -2305,6 +2597,8 @@ func _valid(ns: Array) -> Array:
 	return out
 
 func _set_selection(ns: Array) -> void:
+	if terrain and terrain.editing() and not ns.is_empty() and not ns.has(terrain.edit_node):
+		terrain.stop_edit()   # picked something else (the outliner): leave terrain editing
 	for n in _valid(selection):
 		_highlight(n, false)
 	selection = _valid(ns)
@@ -2322,6 +2616,8 @@ func _highlight(n: Node3D, on: bool) -> void:
 		(n.get_child(0) as Node3D).visible = on
 	elif _is_marker(n) and n.has_meta("volume"):
 		volumes.set_selected(n, on)
+	elif _is_marker(n) and n.has_meta("terrain"):
+		terrain.set_selected(n, on)
 	elif _is_marker(n):
 		var m := (n.get_child(0) as MeshInstance3D).material_override as StandardMaterial3D
 		m.emission_enabled = on
@@ -2334,7 +2630,7 @@ func _highlight(n: Node3D, on: bool) -> void:
 		geometry.set_selected(n, on)
 
 func _place_gizmo() -> void:
-	gizmo.visible = not selection.is_empty() and not selection.all(func(n): return _is_wall(n))
+	gizmo.visible = not selection.is_empty() and not selection.all(func(n): return _is_wall(n)) and not terrain.editing()
 	if selection.is_empty():
 		return
 	var c := Vector3.ZERO
@@ -2347,7 +2643,8 @@ func _gizmo_limits() -> void:
 	# markers: move and turn about Y; volumes: move, size and turn about Y; pieces: everything
 	var markers := selection.any(func(n): return _is_marker(n) and not n.has_meta("volume"))
 	var vols := selection.any(func(n): return n.has_meta("volume"))
-	gizmo.set_limits(not markers, not markers and not vols, true)
+	var terr := selection.any(func(n): return n.has_meta("terrain"))   # moved only
+	gizmo.set_limits(not markers, not markers and not vols, not terr)
 
 func _show_inspector() -> void:
 	updating_ui = true
@@ -2359,6 +2656,9 @@ func _show_inspector() -> void:
 	mesh_col.visible = not geo_pieces.is_empty()
 	mesh_col.button_pressed = geo_pieces.any(func(n): return n.get_meta("tree").get("mesh_collision", false))
 	insp_name.visible = one != null and not _is_marker(one)
+	insp_tag.visible = one != null and not one.has_meta("volume")   # volumes: their Script marker name
+	if insp_tag.visible:
+		insp_tag.text = object_tag(one)
 	for r in insp_rows:
 		r.visible = one != null and not _is_marker(one)
 	for s in insp_pos + insp_rot + insp_scale:
@@ -2386,6 +2686,7 @@ func _show_inspector() -> void:
 	var typed := _typed_markers()
 	type_box.visible = not typed.is_empty()
 	volumes.show_inspector(selection)
+	terrain.show_inspector(selection)
 	if not typed.is_empty():
 		var have: Array = _marker_types(typed[0].get_meta("data"))
 		for i in GAME_TYPES.size():
@@ -2400,7 +2701,7 @@ func _show_inspector() -> void:
 		insp_title.text = "%d selected" % selection.size()
 	elif _is_marker(one):
 		var d: Dictionary = one.get_meta("data")
-		insp_title.text = volumes.label(d) if one.has_meta("volume") else lighting.label(d) if one.has_meta("light") else "%s\nkind %s" % [_marker_label(d, one.get_meta("object")), str(d.get("kind", "?"))]
+		insp_title.text = volumes.label(d) if one.has_meta("volume") else terrain.label(d) if one.has_meta("terrain") else lighting.label(d) if one.has_meta("light") else "%s\nkind %s" % [_marker_label(d, one.get_meta("object")), str(d.get("kind", "?"))]
 		for a in 3:
 			insp_pos[a].value = float(d["pos"][a])
 		insp_rot[1].value = float(d.get("yaw", 0.0))
@@ -2425,7 +2726,7 @@ func _on_inspector() -> void:
 	if _is_marker(n):
 		var d: Dictionary = n.get_meta("data")
 		d["pos"] = [insp_pos[0].value, insp_pos[1].value, insp_pos[2].value]
-		d["yaw"] = insp_rot[1].value
+		d["yaw"] = 0.0 if n.has_meta("terrain") else insp_rot[1].value
 		_place(n)
 		if n.has_meta("light"):
 			lighting.update_marker(n)
@@ -2567,7 +2868,7 @@ func _on_set_type(k: int) -> void:
 	log_line("Set: %s" % _set_label(shown))
 
 func _typed_markers() -> Array:
-	return selection.filter(func(n): return _is_marker(n) and not n.has_meta("light") and not n.has_meta("volume"))
+	return selection.filter(func(n): return _is_marker(n) and not n.has_meta("light") and not n.has_meta("volume") and not n.has_meta("terrain"))
 
 func _marker_types(d: Dictionary) -> Array:
 	return d["modes"] if d.get("modes") is Array else GAME_TYPES.map(func(t): return t[0])
@@ -2613,6 +2914,95 @@ func _on_dig() -> void:
 	dig_count.editable = dig_on.button_pressed
 	dig_pile.disabled = not dig_on.button_pressed
 
+func _on_tag() -> void:
+	if updating_ui or selection.size() != 1 or selection[0].has_meta("volume"):
+		return
+	var t := insp_tag.text.strip_edges().replace(" ", "_")
+	if t != object_tag(selection[0]):
+		_push_undo("")
+		set_object_tag(selection[0], t)
+		insp_tag.text = t
+
+# ---------------------------------------------------------------- script names
+# Any object may carry a script name: markers (spawns, pickups, VS, lights, terrains) in their data's "tag", level
+# pieces in their tree's "tag", volumes as their Script marker name ("marker"). On save they go into project
+# "script_tags" ({name, pos: floor centre cm, size cm, yaw}); lp2mapc adds them to the map's script markers.
+
+func object_tag(n: Node3D) -> String:
+	if n == null or _is_wall(n):
+		return ""
+	if n.has_meta("volume"):
+		return str(n.get_meta("data").get("marker", ""))
+	var d: Dictionary = n.get_meta("data") if _is_marker(n) else n.get_meta("tree")
+	return str(d.get("tag", ""))
+
+func set_object_tag(n: Node3D, t: String) -> void:
+	if n.has_meta("volume"):
+		var d: Dictionary = n.get_meta("data")
+		if t == "":
+			d.erase("marker")
+		else:
+			d["marker"] = t
+		volumes.update_marker(n)
+		volumes.show_inspector([n])
+		return
+	var d: Dictionary = n.get_meta("data") if _is_marker(n) else n.get_meta("tree")
+	if t == "":
+		d.erase("tag")
+	else:
+		d["tag"] = t
+
+func tag_stem(n: Node3D) -> String:
+	# a new name's start for the object (the eyedropper): what it is
+	if n.has_meta("volume"):
+		return "volume"
+	if n.has_meta("light"):
+		return "light"
+	if n.has_meta("terrain"):
+		return "terrain"
+	if _is_marker(n):
+		return ["marker", "weapon", "vs"][_category(n)]
+	var nm := RegEx.create_from_string("[^A-Za-z0-9_]+").sub(str(n.get_meta("tree")["name"]).to_lower(), "_", true)
+	return nm.strip_edges().trim_suffix("_") if nm.strip_edges().trim_suffix("_") != "" else "piece"
+
+func unique_tag(stem: String) -> String:
+	# stem_1, stem_2...: the first no object (or volume marker) has
+	var used := {}
+	for n in markers_root.get_children() + geometry.pieces():
+		var t := object_tag(n).to_lower()
+		if t != "":
+			used[t] = true
+	var k := 1
+	while used.has(("%s_%d" % [stem, k]).to_lower()):
+		k += 1
+	return "%s_%d" % [stem, k]
+
+func ensure_tag(n: Node3D) -> String:
+	var t := object_tag(n)
+	if t == "":
+		_push_undo("")
+		t = unique_tag(tag_stem(n))
+		set_object_tag(n, t)
+		if selection.has(n):
+			_show_inspector()
+	return t
+
+func script_tags() -> Array:
+	var out: Array = []
+	for n in markers_root.get_children():
+		var t := object_tag(n)
+		if t != "" and not n.has_meta("volume"):
+			var d: Dictionary = n.get_meta("data")
+			out.append({"name": t, "pos": d["pos"], "size": [100.0, 200.0, 100.0], "yaw": float(d.get("yaw", 0.0))})
+	for p in geometry.pieces():
+		var t := object_tag(p)
+		if t != "":
+			var b: AABB = geometry.world_box(p)
+			var c := b.get_center()
+			out.append({"name": t, "pos": [snappedf(c.x / CM, 0.1), snappedf(b.position.y / CM, 0.1), snappedf(c.z / CM, 0.1)],
+				"size": [snappedf(b.size.x / CM, 0.1), snappedf(b.size.y / CM, 0.1), snappedf(b.size.z / CM, 0.1)], "yaw": 0.0})
+	return out
+
 func _on_rename() -> void:
 	if updating_ui or selection.size() != 1 or _is_marker(selection[0]):
 		return
@@ -2641,7 +3031,7 @@ func drop_selected() -> void:
 	if selection.is_empty():
 		return
 	_push_undo("")
-	for n in selection.filter(func(q): return not _is_wall(q)):
+	for n in selection.filter(func(q): return not _is_wall(q) and not q.has_meta("terrain")):
 		if _is_marker(n):
 			var from: Vector3 = n.global_position + Vector3(0, 2.0, 0)
 			var hit := _ray(from, from + Vector3(0, -500, 0), 1 << (LAYER_STAGE - 1))
@@ -2673,7 +3063,7 @@ func _pick(mp: Vector2) -> Node3D:
 	var best: Node3D = null
 	var best_d := INF
 	for n in markers_root.get_children():
-		if not n.visible:   # hidden by the view toggles
+		if not n.visible or n.has_meta("terrain"):   # hidden by the view toggles; terrains: by their ground
 			continue
 		for at in [n.global_position + Vector3(0, 1.0, 0), (n.get_child(2) as Node3D).global_position]:
 			if camera.is_position_behind(at):
@@ -2695,6 +3085,18 @@ func _pick(mp: Vector2) -> Node3D:
 	if (col as CollisionObject3D).collision_layer & (1 << (LAYER_MARKERS - 1)):
 		return col.get_parent()
 	return geometry.piece_of(col)
+
+func _face_at(mp: Vector2) -> Dictionary:
+	# the side under the mouse that Ctrl+drag pushes / pulls: a selected terrain's or a volume's face (the nearer);
+	# "mod" = the script that drags it
+	var th: Dictionary = terrain.face_hit(mp)
+	var vh: Dictionary = volumes.face_hit(mp)
+	if not th.is_empty() and (vh.is_empty() or not vh["sel"] or th["t"] < vh["t"]):
+		th["mod"] = terrain
+		return th
+	if not vh.is_empty():
+		vh["mod"] = volumes
+	return vh
 
 func _ray(from: Vector3, to: Vector3, mask: int, exclude: Array = []) -> Dictionary:
 	var q := PhysicsRayQueryParameters3D.create(from, to, mask, exclude)
@@ -2756,10 +3158,11 @@ func duplicate_selected() -> void:
 	var ps := _pieces_selected()
 	var ls := selection.filter(func(n): return n.has_meta("light"))
 	var vs := selection.filter(func(n): return n.has_meta("volume"))
-	if ps.is_empty() and ls.is_empty() and vs.is_empty():
+	var ts := selection.filter(func(n): return n.has_meta("terrain"))
+	if ps.is_empty() and ls.is_empty() and vs.is_empty() and ts.is_empty():
 		return
 	_push_undo("")
-	var out: Array = lighting.duplicate_lights(ls) + volumes.duplicate_volumes(vs)
+	var out: Array = lighting.duplicate_lights(ls) + volumes.duplicate_volumes(vs) + terrain.duplicate_terrains(ts)
 	for p in ps:
 		out.append(geometry.duplicate_piece(p, Vector3(2.0, 0, 0)))
 	_after_structure(out)
@@ -2770,7 +3173,8 @@ func delete_selected() -> void:
 	var ls := selection.filter(func(n): return n.has_meta("light"))
 	# markers placed in the editor (place.gd); the stock ones' counts follow the stock files
 	var vs := selection.filter(func(n): return n.has_meta("volume"))
-	var ms := selection.filter(func(n): return _is_marker(n) and not n.has_meta("light") and not n.has_meta("volume") and (n.get_meta("data") as Dictionary).get("placed", false))
+	var ts := selection.filter(func(n): return n.has_meta("terrain"))
+	var ms := selection.filter(func(n): return _is_marker(n) and not n.has_meta("light") and not n.has_meta("volume") and not n.has_meta("terrain") and (n.get_meta("data") as Dictionary).get("placed", false))
 	var ws := selection.filter(func(n): return _is_wall(n))
 	if not ws.is_empty():
 		_push_undo("")
@@ -2779,15 +3183,16 @@ func delete_selected() -> void:
 		log_line("%d invisible wall(s) removed (kept out of the export; Restore deleted brings them back)" % ws.size())
 		select(selection.filter(func(n): return not _is_wall(n)))
 		_on_collision(true)
-		if ps.is_empty() and ls.is_empty() and ms.is_empty() and vs.is_empty():
+		if ps.is_empty() and ls.is_empty() and ms.is_empty() and vs.is_empty() and ts.is_empty():
 			return
-	if ps.is_empty() and ls.is_empty() and ms.is_empty() and vs.is_empty():
+	if ps.is_empty() and ls.is_empty() and ms.is_empty() and vs.is_empty() and ts.is_empty():
 		if not selection.is_empty():
 			log_line("Only markers placed in the editor can be deleted (the stock ones' counts follow the stock files).")
 		return
 	_push_undo("")
 	lighting.delete_lights(ls)
 	volumes.delete_volumes(vs)
+	terrain.delete_terrains(ts)
 	if not ms.is_empty() and set_index >= 0:
 		var st: Dictionary = layout["sets"][set_index]
 		for n in ms:
@@ -2927,6 +3332,13 @@ func toggle_fog() -> void:
 	else:
 		fog_win.popup()
 
+func toggle_scripts() -> void:
+	if scripts_win.visible:
+		scripts_win.hide()
+	else:
+		scripts_win.refresh()
+		scripts_win.popup()
+
 func toggle_placer() -> void:
 	if placer.visible:
 		placer.hide()
@@ -2992,7 +3404,7 @@ func delete_prefab() -> void:
 # ---------------------------------------------------------------- undo
 
 func _snapshot() -> Array:
-	return [geometry.snapshot(), layout.duplicate(true), (project.get("environment", {}) as Dictionary).duplicate(true), (project.get("lights", []) as Array).duplicate(true), (project.get("volumes", []) as Array).duplicate(true)]
+	return [geometry.snapshot(), layout.duplicate(true), (project.get("environment", {}) as Dictionary).duplicate(true), (project.get("lights", []) as Array).duplicate(true), (project.get("volumes", []) as Array).duplicate(true), terrain.snapshot(), (project.get("scripts", {}) as Dictionary).duplicate(true)]
 
 func _push_undo(key: String) -> void:
 	# one entry per action; a run of the same key (typing in the inspector) within 1.5 s is one entry
@@ -3008,6 +3420,8 @@ func _push_undo(key: String) -> void:
 	redo_stack = []
 
 func _restore(s: Array) -> void:
+	if terrain.editing():
+		terrain.resume_after_restore(terrain.edit_id())   # the rebuilt terrain node goes back into edit mode
 	var walls_before: Dictionary = geometry.walls_hidden.duplicate()
 	geometry.restore(s[0])
 	if geometry.walls_hidden != walls_before and col_toggle.button_pressed:
@@ -3016,6 +3430,12 @@ func _restore(s: Array) -> void:
 	project["environment"] = s[2]
 	project["lights"] = s[3]
 	project["volumes"] = s[4] if s.size() > 4 else []
+	if s.size() > 5:
+		terrain.restore(s[5])
+	if s.size() > 6:
+		project["scripts"] = s[6]
+		if scripts_win.visible:
+			scripts_win.refresh()
 	for i in visible_sets.size():
 		set_pick.set_item_text(i, _set_label(visible_sets[i]))
 	show_set(set_index)
@@ -3077,7 +3497,7 @@ func _update_stats() -> void:
 	for c in perf_grid.get_children():
 		perf_grid.remove_child(c)
 		c.queue_free()
-	var counts := [0, 0, 0, 0, 0, 0, 0]
+	var counts := [0, 0, 0, 0, 0, 0, 0, 0]
 	for n in markers_root.get_children():
 		counts[_category(n)] += 1
 	var rows := [
@@ -3110,6 +3530,18 @@ func _unhandled_input(e: InputEvent) -> void:
 		camera.stop_look()   # its release went to another window: don't swallow clicks until the next right click
 	if camera.is_looking() or preview.active():
 		return
+	if scripts_win and scripts_win.picking:   # the script window's eyedropper: a click adds what's under it to the script
+		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
+			scripts_win.picked(_pick(e.position))
+			get_viewport().set_input_as_handled()
+			return
+		if e is InputEventKey and e.pressed and e.keycode == KEY_ESCAPE:
+			scripts_win.stop_pick()
+			get_viewport().set_input_as_handled()
+			return
+	if terrain.editing() and terrain.handle_input(e):   # terrain edit mode: its brushes and keys; the level is locked
+		get_viewport().set_input_as_handled()
+		return
 	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_RIGHT and e.pressed and e.ctrl_pressed and e.shift_pressed:
 		var bh: Dictionary = volumes.face_hit(e.position)   # Ctrl+Shift+right click: delete the volume box under the mouse
 		if not bh.is_empty() and volumes.sub_boxes(bh["node"].get_meta("data")).size() > 1:
@@ -3122,8 +3554,8 @@ func _unhandled_input(e: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 	# the gizmo and Ctrl+drag on a volume face come before placing (a click elsewhere places)
-	var tool_press: bool = e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT and e.pressed \
-		and (gizmo.hit(e.position) >= 0 or (e.ctrl_pressed and not volumes.face_hit(e.position).is_empty()))
+	var tool_press: bool = e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT and e.pressed and placer._quick == null \
+		and (gizmo.hit(e.position) >= 0 or (e.ctrl_pressed and not _face_at(e.position).is_empty()))
 	if not tool_press and not gizmo.dragging() and face_press.is_empty() and placer.placing() and placer.handle(e):
 		return
 	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT:
@@ -3134,8 +3566,8 @@ func _unhandled_input(e: InputEvent) -> void:
 				gizmo.begin(h, e.position)
 				drag_start = selection.map(func(n): return n.transform)
 				drag_sizes = selection.map(func(n): return (n.get_meta("data")["size"] as Array).duplicate() if n.has_meta("volume") else null)
-			elif e.ctrl_pressed and not volumes.face_hit(e.position).is_empty():
-				face_press = {"hit": volumes.face_hit(e.position), "at": e.position, "shift": e.shift_pressed}
+			elif e.ctrl_pressed and not _face_at(e.position).is_empty():
+				face_press = {"hit": _face_at(e.position), "at": e.position, "shift": e.shift_pressed}
 			else:
 				var n := _pick(e.position)
 				if e.shift_pressed or e.ctrl_pressed:
@@ -3148,7 +3580,7 @@ func _unhandled_input(e: InputEvent) -> void:
 				else:
 					select([n] if n else [])
 		elif not face_press.is_empty():
-			if volumes.face.is_empty():   # a Ctrl+click, not a drag: add / remove from the selection as before
+			if face_press["hit"]["mod"].face.is_empty():   # a Ctrl+click, not a drag: add / remove from the selection as before
 				var n: Node3D = face_press["hit"]["node"]
 				var s := selection.duplicate()
 				if s.has(n):
@@ -3157,7 +3589,7 @@ func _unhandled_input(e: InputEvent) -> void:
 					s.append(n)
 				select(s)
 			else:
-				volumes.end_face()
+				face_press["hit"]["mod"].end_face()
 				_place_gizmo()
 				_update_stats()
 			face_press = {}
@@ -3170,12 +3602,13 @@ func _unhandled_input(e: InputEvent) -> void:
 			_show_inspector()
 			_update_stats()
 	elif e is InputEventMouseMotion and not face_press.is_empty():
-		if volumes.face.is_empty() and e.position.distance_to(face_press["at"]) > 4.0:
+		var fm: Node = face_press["hit"]["mod"]
+		if fm.face.is_empty() and e.position.distance_to(face_press["at"]) > 4.0:
 			_push_undo("")
 			select([face_press["hit"]["node"]])
-			volumes.begin_face(face_press["hit"], face_press["shift"])   # Ctrl+Shift: a new box out of the face
-		if not volumes.face.is_empty():
-			volumes.drag_face(e.position, snap_toggle.button_pressed or (e.shift_pressed and not face_press["shift"]))
+			fm.begin_face(face_press["hit"], face_press["shift"])   # Ctrl+Shift: a new box out of a volume face
+		if not fm.face.is_empty():
+			fm.drag_face(e.position, snap_toggle.button_pressed or (e.shift_pressed and not face_press["shift"]))
 	elif e is InputEventMouseMotion and gizmo.dragging():
 		gizmo.snap = snap_toggle.button_pressed or Input.is_key_pressed(KEY_CTRL)
 		var delta: Transform3D = gizmo.drag(e.position)
@@ -3245,8 +3678,17 @@ func _unhandled_input(e: InputEvent) -> void:
 				toggle_lighting()
 			KEY_T:
 				toggle_placer()
+			KEY_Q:
+				var ms: Array = selection.filter(func(n): return _is_marker(n) and not n.has_meta("volume") \
+					and not n.has_meta("light") and not n.has_meta("terrain"))
+				if ms.size() == 1:
+					placer.quick(ms[0])
+				else:
+					set_status("Quick place (Q): select one spawn point, pickup or VS first")
 			KEY_H:
 				toggle_fog()
+			KEY_K:
+				toggle_scripts()
 			KEY_I:
 				toggle_info()
 			KEY_P:
@@ -3256,7 +3698,9 @@ func _unhandled_input(e: InputEvent) -> void:
 			KEY_DELETE:
 				delete_selected()
 			KEY_ESCAPE:
-				if placer.visible:
+				if placer.cancel_quick():
+					pass
+				elif placer.visible:
 					placer.hide()
 				else:
 					select([])

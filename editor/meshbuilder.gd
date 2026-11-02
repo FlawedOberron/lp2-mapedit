@@ -14,6 +14,8 @@ var imp_info: Label
 var imp_collision: OptionButton
 var imp_scale: SpinBox
 var imp_slots: GridContainer
+var imp_split: CheckBox
+var set_button: Button
 var mat_list: ItemList
 var mat_name: LineEdit
 var mat_files := {}        # kind -> Button showing the file
@@ -56,7 +58,8 @@ func setup(m: Node, t: Node) -> void:
 	var note: Label = main._label("Experimental (work in progress). From Blender: File > Export > glTF 2.0 (.glb) or Wavefront (.obj), "
 		+ "Y up, metres. A file is one mesh, its materials mapped below. Collision: an object named COL_<name> is the collision "
 		+ "for <name> (e.g. COL_Girder, a few boxes, for Girder) and is never drawn; objects without one collide with their own "
-		+ "triangles. Re-import after editing the file in Blender.")
+		+ "triangles. Re-import after editing the file in Blender. Split by object: each Blender object becomes its own mesh "
+		+ "(pivot = its origin; Alt+D linked duplicates share one), and Place set puts the whole file down as laid out.")
 	note.autowrap_mode = TextServer.AUTOWRAP_WORD
 	note.modulate = Color(1, 0.85, 0.55)
 	v.add_child(note)
@@ -66,6 +69,14 @@ func setup(m: Node, t: Node) -> void:
 	main._button(row, "Re-import", reimport_selected).tooltip_text = "Read the file again from where it was imported (placed copies update)"
 	main._button(row, "Delete", delete_selected)
 	v.add_child(row)
+	var row2 := HBoxContainer.new()
+	imp_split = CheckBox.new()
+	imp_split.text = "Split by object"
+	imp_split.tooltip_text = "Import file... makes one mesh per Blender object (named <file>_<object>) instead of one for the whole file"
+	row2.add_child(imp_split)
+	set_button = main._button(row2, "Place set", place_set)
+	set_button.tooltip_text = "Place every object of the selected mesh's file as laid out in Blender, as one group (Ungroup splits it)"
+	v.add_child(row2)
 	import_list = ItemList.new()
 	import_list.custom_minimum_size = Vector2(0, 170)
 	import_list.max_columns = 0
@@ -293,6 +304,7 @@ func _show_import() -> void:
 		imp_slots.remove_child(c)
 		c.queue_free()
 	var a := _selected_import()
+	set_button.disabled = a.is_empty() or str(a["info"].get("group", "")) == ""
 	if a.is_empty():
 		if import_list.item_count:
 			imp_info.text = "Select a mesh to see its settings."
@@ -302,6 +314,9 @@ func _show_import() -> void:
 	var placed: int = main.geometry.placed_from(a["map"]).size()
 	imp_info.text = "%s (from %s): %d triangles, %.2f x %.2f x %.2f m, placed %d times." % [a["name"],
 		info.get("from", info.get("source", "?")), int(info.get("triangles", 0)), sz[0], sz[1], sz[2], placed]
+	if str(info.get("group", "")) != "":
+		imp_info.text += " Object %s of set %s%s." % [info.get("object", "?"), info["group"],
+			" (no longer in the file: re-import keeps it as it was)" if info.get("missing", false) else ""]
 	imp_collision.select(maxi(0, COLLISION.find(info.get("collision", "mesh"))))
 	imp_scale.value = float(info.get("scale", 100.0))
 	var slots: Dictionary = info.get("slots", {})
@@ -332,16 +347,75 @@ func import_file(path: String) -> void:
 		n = "%s_%d" % [name, k]
 		k += 1
 	main.set_status("Importing %s..." % path.get_file())
-	_tool(["import", "--game", main.game, _proj(), path, "--name", n,
-		"--collision", COLLISION[imp_collision.selected] if import_list.item_count else "mesh"], func():
-		main.log_line("Imported %s as %s. Double-click it (or Place) to put a copy in the level." % [path.get_file(), _slug(n)])
+	var split := imp_split.button_pressed
+	if split:
+		while FileAccess.file_exists(_group_path(_slug(n))):
+			n = "%s_%d" % [name, k]
+			k += 1
+	var args := ["import", "--game", main.game, _proj(), path, "--name", n,
+		"--collision", COLLISION[imp_collision.selected] if import_list.item_count else "mesh"]
+	if split:
+		args.append("--split")
+	_tool(args, func():
+		var keys: Array = ["imp_" + _slug(n)]
+		if split:
+			keys = _set_members(_slug(n)).map(func(m): return "imp_" + m)
+			main.log_line("Imported %s as %d meshes (set %s). Place set puts them all down as laid out in Blender." % [path.get_file(), keys.size(), _slug(n)])
+		else:
+			main.log_line("Imported %s as %s. Double-click it (or Place) to put a copy in the level." % [path.get_file(), _slug(n)])
 		if new_folder != "":
-			main.browser._browser_data()["meshes"]["imp_" + _slug(n)] = new_folder
+			for key in keys:
+				main.browser._browser_data()["meshes"][key] = new_folder
 			new_folder = ""
 			main.browser.refresh_prefabs()
-		for i in import_list.item_count:
-			if import_list.get_item_metadata(i) == "imp_" + _slug(n):
-				import_list.select(i))
+		if keys.size():
+			select_key(keys[0]))
+
+func _group_path(set_name: String) -> String:
+	return _proj().path_join("imports").path_join(set_name).path_join("group.json")
+
+func _group(set_name: String) -> Dictionary:
+	var g: Variant = JSON.parse_string(FileAccess.get_file_as_string(_group_path(set_name)))
+	return g if g is Dictionary else {}
+
+func _set_members(set_name: String) -> Array:
+	return (_group(set_name).get("objects", {}) as Dictionary).values()
+
+func place_set() -> void:
+	# every placement in the set's layout (Blender's object matrices), its bottom centre where the view points, as a group
+	var a := _selected_import()
+	if a.is_empty() or str(a["info"].get("group", "")) == "":
+		return
+	var set_name: String = a["info"]["group"]
+	var g := _group(set_name)
+	var pv: Array = g.get("pivot", [0, 0, 0])
+	var mp: Vector2 = main.get_viewport().get_visible_rect().size / 2
+	var hit: Dictionary = main._mouse_ray(mp, 1 << (main.LAYER_STAGE - 1))
+	var at: Vector3 = hit["position"] if hit else main.camera.global_position - main.camera.global_transform.basis.z * 20.0
+	var shift := Transform3D(Basis.IDENTITY, at - Vector3(pv[0], pv[1], pv[2]))
+	main._push_undo("")
+	var ps: Array = []
+	for e in g.get("layout", []):
+		var key: String = "imp_" + str(e["piece"])
+		var mg: Node = main.library.map_geometry(key) if main.library.by_key.has(key) else null
+		if mg == null:
+			continue
+		var ts: Array = mg.default_trees()
+		if ts.is_empty():
+			continue
+		var ms: Array = []
+		for m in main.geometry.members_of(ts[0]):
+			ms.append({"atom": m["atom"], "copy": true, "map": main.library.by_key[key]["map"], "L": m["L"]})
+		var M: Array = e["M"]
+		var tm := Transform3D(Basis(Vector3(M[0], M[4], M[8]), Vector3(M[1], M[5], M[9]), Vector3(M[2], M[6], M[10])),
+			Vector3(M[3], M[7], M[11]))
+		ps.append(main.geometry.add_piece({"name": str(e["piece"]), "members": ms}, shift * tm, true))
+	if ps.is_empty():
+		main.log_line("Nothing to place in set %s (re-import it)." % set_name)
+		return
+	var sel: Node3D = main.geometry.group(ps, set_name) if ps.size() > 1 else ps[0]
+	main._after_structure([sel])
+	main.log_line("Placed set %s: %d pieces as one group (Ungroup to move them apart)." % [set_name, ps.size()])
 
 func _slug(s: String) -> String:
 	# lp2mesh.py slug(): lower case, a-z 0-9 _, 32 characters
@@ -371,6 +445,17 @@ func reimport_selected() -> void:
 	var from: String = (a["info"] as Dictionary).get("from", "")
 	if from == "" or not FileAccess.file_exists(from):
 		main.log_line("%s's file is gone (%s): use Import file... with its new place." % [a["name"], from])
+		return
+	var set_name := str(a["info"].get("group", ""))
+	if set_name != "":
+		# the whole set: every object's mesh (each keeps its own collision / materials), new objects added
+		main.set_status("Re-importing set %s..." % set_name)
+		var before := _set_members(set_name)
+		_tool(["import", "--replace", "--split", "--game", main.game, _proj(), from, "--name", set_name, "--scale", str(imp_scale.value)], func():
+			for m in before:
+				main.geometry.refresh_import("@project/imports/" + str(m))
+			main._stats_later()
+			main.log_line("Re-imported set %s; placed copies follow." % set_name))
 		return
 	var args := ["import", "--replace", "--game", main.game, _proj(), from, "--name", a["name"],
 		"--collision", COLLISION[imp_collision.selected], "--scale", str(imp_scale.value)]

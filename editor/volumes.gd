@@ -11,6 +11,15 @@ extends Node
 #                     lp2mapc: a weather zone in the scene box, like stock maps' interiors (older: "no_weather": true)
 #   "water": true     water up to the box's top: what's inside is underwater (characters lighter, weapons, splashes;
 #                     map.json "water_volumes", xlive mod); no visible surface yet
+#   "damage": {"player": pct, "vs": pct, "player_kill": bool, "vs_kill": bool}
+#                     damage over time inside: % of full health per second, separately for players and VS, or a kill at
+#                     once (lava); the game's own burning damage (map.json "damage_volumes", xlive mod damage.cpp)
+#   "marker": name    a script marker: a named point for scripts (its floor centre, facing its yaw: the arrow), found by
+#                     name or wildcard (outpost_*); its box is the area for "anywhere inside" (map.json "script_markers")
+#   "oneway": {"players": bool, "vs": bool, "bullets": bool, "grenades": bool, "akrid": bool}
+#                     a one-way wall: those ticked may cross the box along its arrow only (its yaw, as markers'); going
+#                     back through it, characters are held, bullets and grenades vanish (map.json "oneway_volumes", xlive
+#                     mod oneway.cpp)
 #   "sound": {"reverb": key}  the game's reverb inside (a stock map's preset, REVERBS; lp2sound.py: the game's own
 #                     sound zones, no xlive mod); outside, the map's own (environment "sound": {"reverb"}, else the base map's)
 # A volume's "pos" is the centre of its floor (cm, like markers), "size" its extent (cm), "yaw" its turn about y
@@ -23,10 +32,16 @@ extends Node
 
 const COLOURS := {"kill": Color(0.95, 0.15, 0.15), "gravity": Color(0.25, 0.55, 1.0), "post": Color(0.75, 0.35, 1.0),
 	"weather": Color(0.3, 0.85, 0.8), "water": Color(0.15, 0.4, 0.95), "sound": Color(0.95, 0.7, 0.2),
+	"damage": Color(1.0, 0.45, 0.05), "marker": Color(1.0, 0.9, 0.2),
+	"oneway": Color(0.3, 1.0, 0.45),
 	"none": Color(0.6, 0.6, 0.6)}
 const ADD := [["kill", "Kill volume (pit)"], ["gravity", "Gravity volume"], ["post", "Post-process volume (screen colour)"],
 	["weather", "Weather limiter volume (indoors)"], ["water", "Water volume (surface at its top)"],
-	["sound", "Sound volume (reverb zone)"]]
+	["sound", "Sound volume (reverb zone)"], ["damage", "Damage volume (lava, fire)"],
+	["marker", "Script marker (a named point for scripts)"], ["oneway", "One-way wall (pass along its arrow only)"]]
+const ONEWAY := {"players": true, "vs": true, "bullets": false, "grenades": false, "akrid": false}   # a new one
+const ONEWAY_NAMES := [["players", "Players"], ["vs", "VS"], ["bullets", "Bullets"], ["grenades", "Grenades"], ["akrid", "Akrid"]]
+const DAMAGE := {"player": 0.0, "vs": 10.0, "player_kill": true, "vs_kill": false}   # a new one: lava
 # the stock maps' reverb presets (lp2-tools sound_presets.json): key, name (decay time)
 const REVERBS := [["15_inside", "Frozen Wasteland, inside (1.5 s)"], ["02_inside", "Kraftwerk, inside: big hall (4.3 s)"],
 	["10_inside", "Pirate Fortress, inside (1.2 s)"], ["05_cave", "Thunderpeal Precipice, cave (2.4 s)"],
@@ -44,6 +59,15 @@ var gravity_on: CheckBox
 var post_on: CheckBox
 var weather_on: CheckBox
 var water_on: CheckBox
+var damage_on: CheckBox
+var damage_rows: Array = []  # the damage controls, shown while it's on
+var damage_spins := {}       # player / vs: % per second
+var damage_kills := {}       # player / vs: kill at once
+var marker_on: CheckBox
+var oneway_on: CheckBox
+var oneway_flags := {}       # players / vs / bullets / grenades / akrid
+var oneway_rows: Array = []
+var marker_name: LineEdit
 var sound_on: CheckBox
 var reverb_pick: OptionButton
 var sound_rows: Array = []   # the sound post-process controls, shown while it's on
@@ -97,6 +121,47 @@ func setup(m: Node, right: VBoxContainer) -> void:
 	water_on = _check(g, "Water", "Water up to the box's top: players inside are underwater (lighter, as on stock water maps; "
 		+ "weapons and effects act underwater). No visible surface yet (xlive mod)")
 	g.add_child(Control.new())
+	damage_on = _check(g, "Damage", "Damage over time inside, separately for players and VS: % of full health per second, or Kill "
+		+ "at once (e.g. lava: kills players, burns VS). Uses the game's burning damage (xlive mod)")
+	g.add_child(Control.new())
+	for k in [["player", "  Players %/s"], ["vs", "  VS %/s"]]:
+		var l: Label = main._label(k[1])
+		var h := HBoxContainer.new()
+		var sp: SpinBox = main._spin(0.0, 100.0, 1.0)
+		sp.tooltip_text = "Percent of full health lost per second inside (hits every quarter second)"
+		sp.value_changed.connect(func(_v): _on_changed())
+		h.add_child(sp)
+		var kc := CheckBox.new()
+		kc.text = "Kill"
+		kc.tooltip_text = "Killed at once on entering"
+		kc.toggled.connect(func(_b): _on_changed())
+		h.add_child(kc)
+		g.add_child(l)
+		g.add_child(h)
+		damage_spins[k[0]] = sp
+		damage_kills[k[0]] = kc
+		damage_rows += [l, h]
+	marker_on = _check(g, "Script name (marker)", "A named point scripts can find (by name, or many at once with a wildcard: "
+		+ "spawn_* finds spawn_1, spawn_2...): its floor centre facing the arrow, or anywhere in its box")
+	marker_name = LineEdit.new()
+	marker_name.placeholder_text = "name"
+	marker_name.tooltip_text = "Letters, digits and _ (not case sensitive); several markers may share a prefix"
+	marker_name.text_changed.connect(func(_t): _on_changed())
+	g.add_child(marker_name)
+	oneway_on = _check(g, "One-way wall", "What's ticked may cross the box only along its arrow (turn it with the yaw); "
+		+ "going back through, players, VS and akrid are held and bullets and grenades vanish (xlive mod)")
+	g.add_child(Control.new())
+	var ol: Label = main._label("  Holds back")
+	var of := HFlowContainer.new()
+	for k in ONEWAY_NAMES:
+		var oc := CheckBox.new()
+		oc.text = k[1]
+		oc.toggled.connect(func(_b): _on_changed())
+		of.add_child(oc)
+		oneway_flags[k[0]] = oc
+	g.add_child(ol)
+	g.add_child(of)
+	oneway_rows += [ol, of]
 	sound_on = _check(g, "Sound post-process", "The game's reverb while the player is inside, from a stock map's (outside: the "
 		+ "map's own). Combines with the other effects, e.g. a building's weather limiter. The game's own sound zones, no xlive mod")
 	g.add_child(Control.new())
@@ -221,6 +286,25 @@ func volumes() -> Array:
 		main.project["volumes"] = []
 	return main.project["volumes"]
 
+func ensure_id(d: Dictionary) -> String:
+	# a volume's id for scripts (scripts.gd), given on first use
+	if str(d.get("id", "")) == "":
+		var used := {}
+		for x in volumes():
+			used[str(x.get("id", ""))] = true
+		var k := 1
+		while used.has("vol%d" % k):
+			k += 1
+		d["id"] = "vol%d" % k
+	return d["id"]
+
+func select_id(id: String) -> void:
+	for n in main.markers_root.get_children():
+		if is_volume(n) and str(n.get_meta("data").get("id", "")) == id and id != "":
+			main.select([n])
+			main.frame_selected()
+			return
+
 static func is_volume(n: Node) -> bool:
 	return n.has_meta("volume")
 
@@ -248,6 +332,12 @@ static func effects(d: Dictionary) -> Array:
 		out.append("water")
 	if d.get("sound"):
 		out.append("sound")
+	if d.has("marker"):
+		out.append("marker")
+	if d.get("damage"):
+		out.append("damage")
+	if d.get("oneway"):
+		out.append("oneway")
 	return out
 
 static func reverb_name(key: String) -> String:
@@ -262,6 +352,9 @@ static func label(d: Dictionary) -> String:
 	for e in effects(d):
 		what.append("kill" if e == "kill" else "gravity x%.2f" % float(d["gravity"]) if e == "gravity" else "post" if e == "post" else "water" if e == "water"
 			else "reverb: " + reverb_name(str(d["sound"].get("reverb", ""))).get_slice(" (", 0) if e == "sound"
+			else "damage" if e == "damage"
+			else "one-way" if e == "oneway"
+			else "marker " + str(d["marker"]) if e == "marker"
 			else "no weather" if float(d["weather"]) <= 0.0 else "weather %d%%" % int(d["weather"]))
 	var nb: int = (d.get("boxes", []) as Array).size()
 	return "Volume: %s (%d x %d x %d m%s)" % [" + ".join(what) if what else "no effect", int(s[0]) / 100, int(s[1]) / 100,
@@ -375,6 +468,13 @@ func update_marker(n: Node3D) -> void:
 		for e in [[0, 1], [1, 3], [3, 2], [2, 0], [4, 5], [5, 7], [7, 6], [6, 4], [0, 4], [1, 5], [2, 6], [3, 7]]:
 			lines.append(b.get_endpoint(e[0]))
 			lines.append(b.get_endpoint(e[1]))
+	if (d.has("marker") or d.get("oneway")) and bs:   # facing: an arrow along -z at half height, like the spawn markers' cone
+		var b0: AABB = bs[0]
+		var h := b0.position.y + b0.size.y / 2
+		var tip := Vector3(0, h, b0.position.z - 0.6)
+		for q in [[Vector3(0, h, 0), tip], [tip, tip + Vector3(0.25, 0, 0.3)], [tip, tip + Vector3(-0.25, 0, 0.3)]]:
+			lines.append(q[0])
+			lines.append(q[1])
 	var mi := n.get_child(0) as MeshInstance3D
 	mi.mesh = st.commit()
 	mi.position = Vector3.ZERO
@@ -462,6 +562,13 @@ func place_volume(effect: String, at: Vector3) -> Node3D:
 		"weather": d["weather"] = 0.0
 		"water": d["water"] = true
 		"sound": d["sound"] = {"reverb": REVERBS[0][0]}
+		"damage": d["damage"] = DAMAGE.duplicate()
+		"marker":
+			d["marker"] = unique_marker("marker_1")
+			d["size"] = [100.0, 200.0, 100.0]
+		"oneway":
+			d["oneway"] = ONEWAY.duplicate()
+			d["size"] = [1000.0, 600.0, 100.0]   # a thin wall
 	volumes().append(d)
 	return add_marker(d)
 
@@ -475,10 +582,34 @@ func duplicate_volumes(ns: Array) -> Array:
 	var out: Array = []
 	for n in ns:
 		var d: Dictionary = (n.get_meta("data") as Dictionary).duplicate(true)
+		d.erase("id")   # scripts point at the original
+		if d.has("marker"):
+			d["marker"] = unique_marker(str(d["marker"]))   # spawn_1 -> spawn_2
 		d["pos"][0] = float(d["pos"][0]) + float(d["size"][0]) + 100.0
 		volumes().append(d)
 		out.append(add_marker(d))
 	return out
+
+func unique_marker(want: String) -> String:
+	# want, or with its trailing number counted up until no marker has the name
+	var used := {}
+	for x in volumes():
+		if x.has("marker"):
+			used[str(x["marker"]).to_lower()] = true
+	if not used.has(want.to_lower()):
+		return want
+	var stem := want
+	var k := 1
+	var r := RegEx.create_from_string("^(.*?)(\\d+)$")
+	var m := r.search(want)
+	if m:
+		stem = m.get_string(1)
+		k = int(m.get_string(2))
+	else:
+		stem += "_"
+	while used.has((stem + str(k)).to_lower()):
+		k += 1
+	return stem + str(k)
 
 func show_inspector(selection: Array) -> void:
 	var vs := selection.filter(func(n): return is_instance_valid(n) and is_volume(n))
@@ -491,6 +622,10 @@ func show_inspector(selection: Array) -> void:
 	for a in 3:
 		size_spins[a].value = float(s[a])
 	kill_on.button_pressed = d.get("kill", false)
+	marker_on.button_pressed = d.has("marker")
+	if marker_name.text != str(d.get("marker", "")):
+		marker_name.text = str(d.get("marker", ""))
+	marker_name.editable = marker_on.button_pressed
 	var nb: int = (d.get("boxes", []) as Array).size()
 	boxes_label.text = "%d boxes" % (nb + 1) if nb else "1 box"
 	remove_box.disabled = nb == 0
@@ -501,6 +636,20 @@ func show_inspector(selection: Array) -> void:
 	reverb_pick.selected = maxi(0, REVERBS.map(func(r): return r[0]).find(rk))
 	for c in sound_rows:
 		c.visible = sound_on.button_pressed
+	var dm: Dictionary = d.get("damage") if d.get("damage") else {}
+	damage_on.button_pressed = not dm.is_empty()
+	for k in damage_spins:
+		damage_spins[k].value = float(dm.get(k, DAMAGE[k]))
+		damage_kills[k].button_pressed = dm.get(k + "_kill", DAMAGE[k + "_kill"] if dm.is_empty() else false)
+		damage_spins[k].editable = not damage_kills[k].button_pressed
+	for c in damage_rows:
+		c.visible = damage_on.button_pressed
+	var ow: Dictionary = d.get("oneway") if d.get("oneway") else {}
+	oneway_on.button_pressed = not ow.is_empty()
+	for k in oneway_flags:
+		oneway_flags[k].button_pressed = ow.get(k, ONEWAY[k] if ow.is_empty() else false)
+	for c in oneway_rows:
+		c.visible = oneway_on.button_pressed
 	weather_spin.value = float(d.get("weather", 0.0))
 	weather_spin.editable = weather_on.button_pressed
 	gravity_on.button_pressed = d.has("gravity")
@@ -534,6 +683,11 @@ func _on_changed() -> void:
 		d["weather"] = weather_spin.value
 	else:
 		d.erase("weather")
+	if marker_on.button_pressed:
+		var nm := marker_name.text.strip_edges().replace(" ", "_")
+		d["marker"] = nm if nm != "" else (str(d["marker"]) if d.has("marker") else unique_marker("marker_1"))
+	else:
+		d.erase("marker")
 	if water_on.button_pressed:
 		d["water"] = true
 	else:
@@ -542,6 +696,22 @@ func _on_changed() -> void:
 		d["sound"] = {"reverb": REVERBS[reverb_pick.selected][0]}
 	else:
 		d.erase("sound")
+	if damage_on.button_pressed:
+		var dm := {}
+		for k in damage_spins:
+			dm[k] = damage_spins[k].value
+			if damage_kills[k].button_pressed:
+				dm[k + "_kill"] = true
+		d["damage"] = dm
+	else:
+		d.erase("damage")
+	if oneway_on.button_pressed:
+		var ow := {}
+		for k in oneway_flags:
+			ow[k] = oneway_flags[k].button_pressed
+		d["oneway"] = ow
+	else:
+		d.erase("oneway")
 	if gravity_on.button_pressed:
 		d["gravity"] = gravity_spin.value
 	else:

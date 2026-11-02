@@ -9,10 +9,11 @@ project.
 
 ## What works
 - **Open** a `.lpme` map (a zip of the project, unpacked into a workspace under the editor's data folder and
-  packed back on every save; a bare `project.json` still opens). **Import map from LP/LP2...** starts one from an
-  LP1 or stock LP2 map. The stage preview (`.preview/geo.json` + `geo.bin` + `tex/`) is built the first
+  packed back on every save; a bare `project.json` still opens). **New map...** starts an empty map (a flat 100 m
+  ground with spawns, to build on with the Mesh builder or terrain) or one imported from an LP1 or stock LP2 map. The stage preview (`.preview/geo.json` + `geo.bin` + `tex/`) is built the first
   time, which takes about 2 minutes (progress bar, top right), then cached.
 - **Viewport:** the stage with its textures and LP1 baked light (toggle **Baked light** for sun lighting).
+  Back faces are culled (a preview built by an older version draws both sides until **Rebuild preview**).
   - Hold the right mouse button to look; WASD to move, Q / E down / up, Shift for faster, mouse wheel
     (while looking) to change speed.
 - **Outliner** (left), grouped: Spawns & game logic, Pickups, Vehicles, Level geometry.
@@ -20,6 +21,8 @@ project.
   - spawns as capsules: red = team A, blue = team B, green = other
   - VS = orange boxes, weapons = yellow, other objects (posts...) = purple
   - every marker has a dot that stays visible from across the map
+  - **Quick place (Q):** with one spawn, pickup or VS selected, click where it goes and drag to aim it
+    (Ctrl or Snap: 15 degree steps); Esc cancels.
 - **Level geometry:** the stage is split into pieces (lp2pieces.py: connected parts, near ones joined).
   - Click to select (Shift / Ctrl+click adds); clicking never moves anything.
   - **Gizmo:** W move, E rotate, R scale; drag an axis handle, or the centre ball (move on the view plane /

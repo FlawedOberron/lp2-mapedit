@@ -696,6 +696,10 @@ def bake_preview(folder, log=print):
     order = np.argsort(attrs["group"], kind="stable")   # back into blocks
     attrs, T, comp = {k: v[order] for k, v in attrs.items()}, np.argsort(order)[T], comp[order]
     T = T[np.argsort(attrs["group"][T[:, 0]], kind="stable")]
+    # the detail splits' new triangles wound counter-clockwise about their normals too (lp2preview.write_geo)
+    face = np.cross(attrs["P"][T[:, 1]] - attrs["P"][T[:, 0]], attrs["P"][T[:, 2]] - attrs["P"][T[:, 0]])
+    back = (face * attrs["N"][T].sum(1)).sum(1) < 0
+    T[back] = T[back][:, [0, 2, 1]]
     write_custom(os.path.join(prev, "bake.bin"), comp)
     L = combine(comp, env, s)
     col = np.array(attrs["C"], np.float32)

@@ -24,7 +24,7 @@ The package is the base stock map (project base.stock, 0 = Desecration) with eve
                            path-keyed cache never mixes it up with the stock map or another package
 Every file comes from the user's own game install and the project's assets.
 """
-import argparse, hashlib, json, math, os, shutil, struct, subprocess, sys, tempfile, zipfile, zlib
+import argparse, hashlib, json, math, os, re, shutil, struct, subprocess, sys, tempfile, zipfile, zlib
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -92,7 +92,9 @@ def stock_package(game, pkg, stock):
             shutil.copyfile(s, os.path.join(pkg, "nativePC", rel))
     for arc, name, cls, ext in mapslot.BOOT_RESOURCES:  # per-map resources the game also reads loose
         n = name.format(stock)
-        data = next(d for x, d in entries(os.path.join(native, arc))[cls] if x.lower() == n.lower())
+        data = next((d for x, d in entries(os.path.join(native, arc)).get(cls, []) if x.lower() == n.lower()), None)
+        if data is None:  # not every map has each (online 09 has no MaterialSkipList)
+            continue
         out = os.path.join(pkg, "nativePC", *n.split("\\")) + "." + ext
         os.makedirs(os.path.dirname(out), exist_ok=True)
         open(out, "wb").write(data)
@@ -194,9 +196,204 @@ def no_weather_volumes(p):
                  yaw=volume_yaw(v), amount=max(0.0, min(100.0, float(v.get("weather", 0.0))))) for v in vs]
 
 
+# visual scripting (the editor's scripts.gd): node type -> (input ports, output ports, props kept)
+SCRIPT_TYPES = {
+    "start": ((), ("then",), ()),
+    "enter": ((), ("entered", "left"), ("who",)),
+    "timer": (("start", "stop"), ("tick",), ("seconds", "max_seconds", "repeat", "autostart")),
+    "delay": (("in",), ("then",), ("seconds", "max_seconds")),
+    "flipflop": (("in",), ("A", "B"), ()),
+    "counter": (("in", "reset"), ("reached",), ("target",)),
+    "set": (("in",), ("then",), ()),
+    "if": (("in",), ("on", "off"), ()),
+    "volume": (("on", "off", "toggle"), ("then",), ()),
+    "log": (("in",), ("then",), ("text",)),
+    "random": (("in",), ("then",), ("integer",)),
+    "math": (("in",), ("then",), ("op",)),
+    "compare": (("in",), ("yes", "no"), ("op",)),
+    "setvalue": (("in",), ("then",), ("setting", "seconds")),
+    "players": (("in",), ("then",), ()),
+    "list": (("add", "remove", "clear"), ("then",), ()),
+    "listremove": (("in",), ("then",), ("check",)),
+    "listget": (("in",), ("found", "none"), ("random",)),
+    "listcount": (("in",), ("then",), ()),
+    "foreach": (("in",), ("each", "done"), ()),
+    "playercheck": (("in",), ("yes", "no"), ("check",)),
+    "playerget": (("in",), ("then",), ("stat",)),
+    "playeract": (("in",), ("then",), ("action",)),
+    "loop": (("in",), ("each", "done"), ()),
+    "findmarkers": (("in",), ("found", "none"), ("text",)),
+    "getmarker": (("in",), ("found", "none"), ("text", "random")),
+    "spawn": (("in",), ("spawned", "skipped"), ("kind", "items", "random")),
+    "teleport": (("in",), ("moved", "skipped"), ("random", "face")),
+    "getpos": (("in",), ("then", "none"), ()),
+    "vector": (("in",), ("then",), ("vecop",)),
+    "switch": (("in",), ("1", "2", "3", "4", "5", "6", "default"), ("cases",)),
+    "sequence": (("in",), ("1", "2", "3", "4", "5", "6"), ()),
+    "gate": (("in", "open", "close", "toggle"), ("then",), ("autostart",)),
+    "once": (("in", "reset"), ("then",), ()),
+    "branch": (("in",), ("1", "2", "3", "4", "5", "6"), ("target",)),
+    "chance": (("in",), ("yes", "no"), ()),
+    "cooldown": (("in", "reset"), ("then", "blocked"), ("seconds",)),
+}
+SCRIPT_VEC_NUMBER_OPS = ("length", "getx", "gety", "getz", "getyaw")   # vector ops whose result is a number
+SCRIPT_VEC_B_VECTOR = ("add", "sub")                                    # ops whose B is a vector (else a number)
+SCRIPT_VOLUME_NODES = ("enter", "volume", "setvalue")
+# the variables a node names, by field: number ("var"), player ("player"; optional on enter), list ("list")
+SCRIPT_VAR_NODES = ("set", "if", "random", "math", "listcount", "playerget", "loop")
+SCRIPT_PLAYER_NODES = ("enter", "list", "listget", "foreach", "playercheck", "playerget", "playeract", "getmarker",
+                       "spawn", "teleport")
+SCRIPT_LIST_NODES = ("players", "list", "listremove", "listget", "listcount", "foreach", "findmarkers")
+SCRIPT_ITEM_NODES = ("list", "listget", "foreach")   # their "player" is a list entry: a marker for a markers list
+SCRIPT_OPERANDS = {"set": ("a",), "random": ("a", "b"), "math": ("a", "b"), "compare": ("a", "b"), "setvalue": ("a",),
+                   "listremove": ("a",), "listget": ("a",), "playercheck": ("a",), "playeract": ("a",),
+                   "loop": ("a", "b"), "spawn": ("a",), "vector": ("a", "b"),
+                   "switch": ("a",), "chance": ("a",)}
+
+
+def script_volume_ids(p):
+    """volume id -> script volume number, for the volumes the scripts use"""
+    out = {}
+    ids = {v.get("id") for v in p.get("volumes", []) if v.get("id")}
+    for n in (p.get("scripts") or {}).get("nodes", []):
+        vid = n.get("volume")
+        if n.get("type") in SCRIPT_VOLUME_NODES and vid in ids and vid not in out:
+            out[vid] = len(out)
+    return out
+
+
+def script_var_name(x):
+    return str(x).strip().lower()
+
+
+def script_operand(x, names):
+    """a node value: a number, else a variable's name -> {"var": index}"""
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        name = script_var_name(x) or "var"
+        if name not in names:
+            names.append(name)
+        return {"var": names.index(name)}
+
+
+def script_manifest(p, log=print):
+    """map.json "script" for the xlive mod (scripts.cpp): {nodes: [{type, props, sid / var, a / b (number or
+    {var}), out: {port: [[node, in port]]}}], volumes: count, start_off: [volume numbers], vars: count, var_names}
+    and "script_volumes" (every box of a used volume, "sid")"""
+    sids = script_volume_ids(p)
+    src = [n for n in (p.get("scripts") or {}).get("nodes", []) if n.get("type") in SCRIPT_TYPES]
+    keep, dropped = [], []
+    for n in src:
+        if n["type"] in SCRIPT_VOLUME_NODES and n.get("volume") not in sids:
+            dropped.append(n["id"])
+        else:
+            keep.append(n)
+    if dropped:
+        log(f"  script: {len(dropped)} node(s) without a volume skipped ({', '.join(dropped)})")
+    if not keep:
+        return {}
+    index = {n["id"]: i for i, n in enumerate(keep)}
+    names = []
+    kinds = {}
+    # lists filled by findmarkers hold markers (their entries too); the rest players
+    marker_lists = {script_var_name(n.get("list", "")) or "players" for n in keep if n["type"] == "findmarkers"}
+    nodes = []
+
+    def ref(n, field, kind, default):
+        name = script_var_name(n.get(field, "")) or default
+        if not name:
+            return None
+        if name not in names:
+            names.append(name)
+        if kinds.setdefault(name, kind) != kind:
+            log(f"  script: variable \"{name}\" used as a {kinds[name]} and a {kind} ({n['id']})")
+        return names.index(name)
+
+    for n in keep:
+        ins, outs, props = SCRIPT_TYPES[n["type"]]
+        e = {"type": n["type"], "out": {}}
+        for k in props:
+            if k in n:
+                e[k] = n[k]
+        if n["type"] in SCRIPT_VOLUME_NODES:
+            e["sid"] = sids[n["volume"]]
+        if n["type"] in SCRIPT_VAR_NODES:
+            e["var"] = ref(n, "var", "number", "var")
+        if n["type"] == "getpos":
+            e["var"] = ref(n, "var", "vector", "pos")
+            e["from"] = "marker" if n.get("from") == "marker" else "player"
+            if e["from"] == "marker":
+                e["marker"] = ref(n, "marker", "marker", "spot")
+            else:
+                e["player"] = ref(n, "player", "player", "player")
+        if n["type"] == "vector":
+            op = n.get("vecop", "add")
+            e["var"] = ref(n, "var", "number" if op in SCRIPT_VEC_NUMBER_OPS else "vector", "pos")
+            for k in ("a", "b"):   # name the operands' kinds (numbers stay numbers)
+                x = n.get(k, "")
+                try:
+                    float(x)
+                except (TypeError, ValueError):
+                    if k == "a" or op in SCRIPT_VEC_B_VECTOR:
+                        ref(n, k, "vector", "pos")
+            if op in ("tolocal", "fromlocal"):
+                e["marker"] = ref(n, "marker", "marker", "spot")
+        lname = script_var_name(n.get("list", "")) or "players"
+        of_markers = lname in marker_lists
+        if n["type"] in SCRIPT_PLAYER_NODES:
+            marker = n["type"] in ("getmarker", "spawn") or (n["type"] in SCRIPT_ITEM_NODES and of_markers)
+            v = ref(n, "player", "marker" if marker else "player", "" if n["type"] == "enter" else "player")
+            if v is not None:
+                e["player"] = v
+        if n["type"] == "teleport":   # its "player" is who; where: "marker", or a vector ("vec")
+            if n.get("to") == "vector":
+                e["vec"] = ref(n, "vec", "vector", "pos")
+            else:
+                e["marker"] = ref(n, "marker", "marker", "spot")
+        if n["type"] in SCRIPT_LIST_NODES:
+            e["list"] = ref(n, "list", "markers" if of_markers else "list", "players")
+        if n["type"] == "set":
+            value = str(n.get("value", "toggle")).strip().lower()
+            if value == "toggle":
+                e["toggle"] = True
+            else:
+                e["a"] = 1.0 if value == "on" else 0.0 if value == "off" else script_operand(value, names)
+        for k in SCRIPT_OPERANDS.get(n["type"], ()):
+            if n["type"] != "set" and k in n:
+                e[k] = script_operand(n[k], names)
+        nodes.append(e)
+    for a, port, b, inport in (p.get("scripts") or {}).get("links", []):
+        if a in index and b in index and port in SCRIPT_TYPES[keep[index[a]]["type"]][1] \
+                and inport in SCRIPT_TYPES[keep[index[b]]["type"]][0]:
+            nodes[index[a]]["out"].setdefault(port, []).append([index[b], inport])
+    start_off = sorted({sids[n["volume"]] for n in keep if n["type"] == "volume" and n.get("start_off")})
+    boxes = []
+    for v in all_parts(p):
+        if v.get("id") in sids:
+            lo, hi = volume_local(v)
+            boxes.append(dict(min=lo, max=hi, sid=sids[v["id"]], **({"yaw": volume_yaw(v)} if volume_yaw(v) else {})))
+    markers = []
+    for v in p.get("volumes", []):
+        if "marker" in v:
+            markers.append({"name": script_var_name(v["marker"]), "pos": list(v["pos"]),
+                            "size": list(v.get("size", [100, 200, 100])), "yaw": volume_yaw(v)})
+    for t in p.get("script_tags", []):   # any object's script name (the editor's: pieces, lights, spawns, pickups, VS)
+        markers.append({"name": script_var_name(t["name"]), "pos": [float(x) for x in t["pos"]],
+                        "size": [float(x) for x in t.get("size", [100, 200, 100])], "yaw": float(t.get("yaw", 0.0)) % 360.0})
+    natural = lambda m: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", m["name"])]
+    markers.sort(key=natural)
+    log(f"  script: {len(nodes)} node(s), {len(sids)} volume(s), {len(names)} variable(s), {len(markers)} marker(s)")
+    return {"script_markers": markers, "script": {"nodes": nodes, "volumes": len(sids), "start_off": start_off, "vars": len(names),
+                       "var_names": names, "var_kinds": [kinds.get(x, "number") for x in names]},
+            "script_volumes": boxes}
+
+
 def gravity_manifest(p):
     """map.json gravity and screen settings for the xlive mod (gravity.cpp, post.cpp): environment jump_packs /
-    underwater / gravity, gravity volumes, post-process volumes, water volumes (water.cpp: water up to the box's top)"""
+    underwater / gravity, gravity volumes, post-process volumes, water volumes (water.cpp: water up to the box's top),
+    damage volumes (damage.cpp: "damage": {player, vs: % of full health per second; player_kill / vs_kill: at once}),
+    one-way walls (oneway.cpp: "oneway": {players, vs, bullets, grenades, akrid}: crossed along the box's arrow only)"""
     env, out = p.get("environment", {}), {}
     if env.get("jump_packs"):
         out["jump_packs"] = True
@@ -209,11 +406,29 @@ def gravity_manifest(p):
     vols = []
     posts = []
     water = []
+    damage = []
+    oneway = []
+    sids = script_volume_ids(p)
     for v in all_parts(p):
         lo, hi = volume_local(v)
         turn = {"yaw": volume_yaw(v)} if volume_yaw(v) else {}   # the xlive mod tests the box turned about its centre
+        if v.get("id") in sids:
+            turn["sid"] = sids[v["id"]]   # scripts switch its effects (scripts.cpp)
         if v.get("water"):
             water.append(dict(min=lo, max=hi, **turn))
+        if v.get("damage"):
+            q = v["damage"]
+            e = dict(min=lo, max=hi, player=max(0.0, float(q.get("player", 0))), vs=max(0.0, float(q.get("vs", 0))),
+                     **turn)
+            for k in ("player_kill", "vs_kill"):
+                if q.get(k):
+                    e[k] = True
+            if e["player"] or e["vs"] or e.get("player_kill") or e.get("vs_kill"):
+                damage.append(e)
+        if v.get("oneway"):
+            flags = {k: True for k in ("players", "vs", "bullets", "grenades", "akrid") if v["oneway"].get(k)}
+            if flags:
+                oneway.append(dict(min=lo, max=hi, **flags, **turn))
         if volume_gravity(v) is not None:
             vols.append(dict(min=lo, max=hi, gravity=volume_gravity(v), **turn))
         if v.get("post"):
@@ -227,6 +442,10 @@ def gravity_manifest(p):
         out["post_volumes"] = posts
     if water:
         out["water_volumes"] = water
+    if damage:
+        out["damage_volumes"] = damage
+    if oneway:
+        out["oneway_volumes"] = oneway
     return out
 
 
@@ -308,18 +527,24 @@ def csv(v):
     return ",".join(f"{x:g}" for x in v)
 
 
-def rebuild_physics(src, template, out, pieces, geo, library, project=None):
+def rebuild_physics(src, template, out, pieces, geo, library, project=None, bullet=None):
     """the physics mesh with the pieces' edits (moved / hidden / copied triangles follow their atoms, like the
-    collision) and other maps' pieces' bullet collision, with a new MOPP tree -> a log line"""
-    import lp2havok, lp2mopp
-    verts, tris, _, _ = lp2havok.read(open(src, "rb").read())
-    V = np.asarray(verts, np.float64) * 100   # lp2pieces works in cm (the collision's units)
-    groups = []
-    for i in range(0, len(tris), 16000):  # collision groups hold at most 65535 vertices
-        T = np.asarray(tris[i:i + 16000], np.int64)
-        used, inv = np.unique(T, return_inverse=True)
-        groups.append(dict(verts=[tuple(x) for x in V[used]], tris=[(tuple(int(k) for k in t), 0) for t in inv.reshape(-1, 3)]))
-    groups, (mv, dr, cp) = lp2pieces.apply_collision(groups, *pieces, geo)
+    collision) and other maps' pieces' bullet collision, with a new MOPP tree -> a log line. src None: the
+    stage's physics is its bullet collision (SBC1 file bullet; a new empty map has no physics file)"""
+    import lp2col, lp2havok, lp2mopp
+    if src is None:
+        groups = [dict(verts=g["verts"], tris=[(t, 0) for t, _ in g["tris"]]) for g in lp2col.read_sbc1(open(bullet, "rb").read())]
+    else:
+        verts, tris, _, _ = lp2havok.read(open(src, "rb").read())
+        V = np.asarray(verts, np.float64) * 100   # lp2pieces works in cm (the collision's units)
+        groups = []
+        for i in range(0, len(tris), 16000):  # collision groups hold at most 65535 vertices
+            T = np.asarray(tris[i:i + 16000], np.int64)
+            used, inv = np.unique(T, return_inverse=True)
+            groups.append(dict(verts=[tuple(x) for x in V[used]], tris=[(tuple(int(k) for k in t), 0) for t in inv.reshape(-1, 3)]))
+    mv = dr = cp = 0
+    if pieces:
+        groups, (mv, dr, cp) = lp2pieces.apply_collision(groups, *pieces, geo)
     groups += lp2pieces.foreign_collision(library, geo, "lp1_bullet", project)
     verts, tris = [], []
     for g in groups:
@@ -481,6 +706,18 @@ def preload_arcs(game, osf_dir):
     return sorted(have[w] for w in want if w in have)
 
 
+def script_preload(game, p):
+    """the autoArc archives for what the scripts' Spawn nodes may make (uWpXX pickups, uVsXX VS)"""
+    auto = os.path.join(game, "nativePC", "arcLp2Xml", "autoArc")
+    have = {f[:-4].lower(): f[:-4] for f in os.listdir(auto) if f.lower().endswith(".arc")}
+    want = set()
+    for n in (p.get("scripts") or {}).get("nodes", []):
+        if n.get("type") == "spawn":
+            for i in n.get("items", []):
+                want.add(("uvs%02x" if n.get("kind") == "vs" else "uwp%02x") % int(i))
+    return sorted(have[w] for w in want if w in have)
+
+
 def compile_project(game, folder, out_zip, work=None, log=print, library=None):
     p = lp2project.load(folder)
     bad = lp2project.check(folder)
@@ -526,6 +763,10 @@ def compile_project(game, folder, out_zip, work=None, log=print, library=None):
                  "--light", p["stage"].get("light_scale", 0.5), "--balance", p["stage"].get("light_balance", 1.0), *sum((["--empty", s] for s in STUBS), []), *models,
                  progress=(0.05, 0.55))
         geo = lp2pieces.load_geometry(P(p["geometry"]["file"])) if p.get("geometry") else {}
+        if p.get("terrains"):   # terrain areas: built as pieces of the project's own, placed as copies
+            import lp2terrain
+            report(0.555, "terrain")
+            geo = lp2terrain.add_copies(game, folder, p, geo, log)
         pieces = None
         if lp2pieces.edited(geo):  # the editor's moved / hidden / copied level geometry
             report(0.56, "level geometry edits")
@@ -611,7 +852,10 @@ def compile_project(game, folder, out_zip, work=None, log=print, library=None):
         if p["collision"].get("lp2_physics"):   # an LP2 map's own (map space, as the stage)
             shutil.copyfile(P(p["collision"]["lp2_physics"]), W("hav.rHkCollision"))
             log("  physics: the LP2 map's own" + (" (it keeps the original geometry)" if pieces else ""))
-        elif pieces and p["collision"].get("rebuild_physics"):
+        elif not p["collision"].get("lp1_physics"):   # a new empty map: from the bullet collision
+            log("  " + rebuild_physics(None, tmpl["havonline00"], W("hav.rHkCollision"), pieces, geo, library, folder,
+                                       bullet=P(p["collision"]["lp1_bullet"])))
+        elif pieces and (p["collision"].get("rebuild_physics") or p.get("terrains")):   # terrain: grenades land on it
             log("  " + rebuild_physics(P(p["collision"]["lp1_physics"]), tmpl["havonline00"], W("hav.rHkCollision"),
                                        pieces, geo, library, folder))
         else:
@@ -686,9 +930,16 @@ def compile_project(game, folder, out_zip, work=None, log=print, library=None):
         put(A["v"], {f: q for f, q in out.items() if f.lower() in in_v})
 
         preload = preload_arcs(game, ip_out)
+        preload = sorted(set(preload) | set(script_preload(game, p)))
         log(f"  preload: {len(preload)} VS / weapon archives")
         manifest = dict(name=info["name"], base=0, number=0, size=info["size"], preload=preload)
         manifest.update(gravity_manifest(p))
+        manifest.update(script_manifest(p, log))
+        if p.get("terrains"):   # damage-painted terrain layers: boxes over their cells
+            import lp2terrain
+            tdmg = lp2terrain.damage_volumes(folder, p, log)
+            if tdmg:
+                manifest["damage_volumes"] = manifest.get("damage_volumes", []) + tdmg
         json.dump(manifest, open(os.path.join(pkg, "map.json"), "w"), indent=1)
         th = info.get("thumbnail")
         if th:

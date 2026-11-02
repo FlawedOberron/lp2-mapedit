@@ -149,6 +149,8 @@ func _load_node(node: Dictionary, xf: Dictionary, copies: Array, used: Dictionar
 		var g: Dictionary = {"name": node["name"], "children": ch} if ch.size() > 1 else ch[0].merged({"name": node["name"]}, true)
 		if node.get("mesh_collision", false):
 			g["mesh_collision"] = true
+		if node.has("tag"):
+			g["tag"] = node["tag"]
 		return g
 	var members: Array = []
 	for at in node.get("atoms", []):
@@ -168,6 +170,8 @@ func _load_node(node: Dictionary, xf: Dictionary, copies: Array, used: Dictionar
 	var out := {"name": node["name"], "members": members}
 	if node.get("mesh_collision", false):
 		out["mesh_collision"] = true
+	if node.has("tag"):
+		out["tag"] = node["tag"]   # script name (main.gd object_tag)
 	return out
 
 func _from_cm(m: Array) -> Transform3D:
@@ -183,6 +187,9 @@ func _to_cm(t: Transform3D) -> Array:
 func _make_materials(prev: String) -> void:
 	materials_lit = []
 	materials_baked = []
+	# back faces are culled once the preview's triangles are wound to their normals (lp2preview.write_geo "wind");
+	# an older preview is drawn double-sided (PC LP1 stages have whole pieces wound the other way) until rebuilt
+	var oriented: bool = data.get("wind", "") == "ccw"
 	for m in data["materials"]:
 		var tex: Texture2D = null
 		if m["tex"] != null:
@@ -196,6 +203,7 @@ func _make_materials(prev: String) -> void:
 		if tex:
 			lit.set_shader_parameter("albedo", tex)
 			lit.set_shader_parameter("has_texture", true)
+		lit.set_shader_parameter("cull_back", oriented)
 		materials_lit.append(lit)
 		var sm := ShaderMaterial.new()
 		sm.shader = preload("res://baked.gdshader")
@@ -203,6 +211,7 @@ func _make_materials(prev: String) -> void:
 		if tex:
 			sm.set_shader_parameter("albedo", tex)
 			sm.set_shader_parameter("has_texture", true)
+		sm.set_shader_parameter("cull_back", oriented)
 		materials_baked.append(sm)
 
 func set_bake_params(p: Dictionary) -> void:
@@ -301,7 +310,7 @@ func build_mesh(t: Dictionary) -> ArrayMesh:
 				else:
 					acc[5 + c].append_array(g.bake_ch[c].slice(v0 * 4, (v0 + vn) * 4))
 			var ii: PackedInt32Array = g.idx.slice(b[4], b[4] + b[5])
-			if flip:
+			if not flip:   # LP2's counter-clockwise -> Godot's front faces (clockwise); a mirrored copy is already
 				for i in range(0, ii.size(), 3):
 					var s := ii[i]
 					ii[i] = ii[i + 1]
@@ -390,7 +399,9 @@ func rebuild(p: Node3D) -> void:
 		body.collision_layer = LAYER_STAGE
 		body.collision_mask = 0
 		var cs := CollisionShape3D.new()
-		cs.shape = mesh.create_trimesh_shape()
+		var shape: ConcavePolygonShape3D = mesh.create_trimesh_shape()
+		shape.backface_collision = true   # clicks land on either side (previews from before the winding fix)
+		cs.shape = shape
 		body.add_child(cs)
 		p.add_child(body)
 
@@ -544,9 +555,11 @@ func duplicate_piece(p: Node3D, offset: Vector3) -> Node3D:
 	return add_piece(t, Transform3D(p.transform.basis, p.transform.origin + offset), false)
 
 func _dup_tree(t: Dictionary) -> Dictionary:
-	if t.has("children"):
-		return {"name": t["name"], "children": t["children"].map(func(c): return _dup_tree(c))}
-	return {"name": t["name"], "members": t["members"].map(func(m): return m.duplicate())}
+	var o := {"name": t["name"], "children": t["children"].map(func(c): return _dup_tree(c))} if t.has("children") \
+		else {"name": t["name"], "members": t["members"].map(func(m): return m.duplicate())}
+	if t.has("tag"):
+		o["tag"] = t["tag"]
+	return o
 
 func delete_piece(p: Node3D) -> void:
 	for m in members_of(p.get_meta("tree")):
@@ -650,6 +663,8 @@ func _tree_out(t: Dictionary, g: Transform3D, xf: Dictionary, copies: Array) -> 
 		var o := {"name": t["name"], "children": t["children"].map(func(c): return _tree_out(c, g, xf, copies))}
 		if t.get("mesh_collision", false):
 			o["mesh_collision"] = true
+		if t.has("tag"):
+			o["tag"] = t["tag"]
 		return o
 	var atoms: Array = []
 	var cps: Array = []
@@ -670,6 +685,8 @@ func _tree_out(t: Dictionary, g: Transform3D, xf: Dictionary, copies: Array) -> 
 		out["copies"] = cps
 	if t.get("mesh_collision", false):
 		out["mesh_collision"] = true   # lp2pieces.mesh_collision: collision from the visible triangles
+	if t.has("tag"):
+		out["tag"] = t["tag"]
 	return out
 
 func to_json() -> Dictionary:

@@ -1,7 +1,8 @@
 extends Window
-# Import map window: a new map (.lpme) from one of Lost Planet 1's maps (lp2project.py import-lp1 --game: its stage,
-# collision, physics and layout, converted to explicit LP2 markers) or one of Lost Planet 2's online maps
-# (lp2project.py import-lp2), saved and opened.
+# New map window: an empty map (lp2project.py new: a flat ground slab and spawns, for building your own) or a map
+# imported from one of Lost Planet 1's maps (lp2project.py import-lp1 --game: its stage, collision, physics and
+# layout, converted to explicit LP2 markers) or one of Lost Planet 2's online maps (lp2project.py import-lp2),
+# saved and opened.
 
 var main: Node
 var source_pick: OptionButton
@@ -12,7 +13,7 @@ var note: Label
 var browse: FileDialog
 
 func _init() -> void:
-	title = "Import map from Lost Planet 1 / 2"
+	title = "New map"
 	size = Vector2i(600, 280)
 	min_size = Vector2i(460, 240)
 	transient = true
@@ -32,10 +33,11 @@ func setup(m: Node) -> void:
 	var g := GridContainer.new()
 	g.columns = 2
 	v.add_child(g)
-	_label(g, "From")
+	_label(g, "Start from")
 	source_pick = OptionButton.new()
 	source_pick.add_item("Lost Planet 1 (Extreme Condition)")
 	source_pick.add_item("Lost Planet 2")
+	source_pick.add_item("Empty map (100 m ground)")
 	source_pick.item_selected.connect(func(_i): _list_maps())
 	g.add_child(source_pick)
 	_label(g, "Map")
@@ -88,10 +90,20 @@ func open() -> void:
 func _lp2() -> bool:
 	return source_pick.selected == 1
 
+func _empty() -> bool:
+	return source_pick.selected == 2
+
 func _list_maps() -> void:
 	map_pick.clear()
 	note.text = ""
-	if _lp2():
+	map_pick.disabled = _empty()
+	if _empty():
+		if not main.is_lp2_folder(main.game):
+			note.text = "Set the Lost Planet 2 folder in Settings first."
+		else:
+			note.text = "A flat 100 x 100 m ground (grey 1 m grid) with spawns and a kill floor at -30 m. Import your own " \
+				+ "level from Blender with the Mesh builder (M), then hide the ground (or keep it)."
+	elif _lp2():
 		if not main.is_lp2_folder(main.game):
 			note.text = "Set the Lost Planet 2 folder in Settings first."
 		for k in main.lighting.MAP_NAMES:
@@ -112,7 +124,9 @@ func _list_maps() -> void:
 	_suggest()
 
 func _suggest() -> void:
-	if map_pick.item_count:
+	if _empty():
+		name_edit.text = "My Map"
+	elif map_pick.item_count:
 		var t := map_pick.get_item_text(map_pick.selected)
 		name_edit.text = t.get_slice(" (online", 0) + " (edit)" if _lp2() else "LP1 " + t
 	_suggest_folder()
@@ -121,7 +135,7 @@ func _suggest_folder() -> void:
 	folder_edit.text = main.maps_dir().path_join(name_edit.text.strip_edges().validate_filename().replace(" ", "") + ".lpme")
 
 func _on_create() -> void:
-	if not map_pick.item_count or name_edit.text.strip_edges() == "":
+	if (not _empty() and not map_pick.item_count) or name_edit.text.strip_edges() == "":
 		return
 	var out := folder_edit.text.strip_edges()
 	if out.get_extension().to_lower() != "lpme":
@@ -130,7 +144,9 @@ func _on_create() -> void:
 		note.text = "%s already exists: pick another name" % out.get_file()
 		return
 	hide()
-	if _lp2():
+	if _empty():
+		main.new_empty_map(out, name_edit.text.strip_edges())
+	elif _lp2():
 		main.import_lp2_map(map_pick.get_selected_metadata(), out, name_edit.text.strip_edges())
 	else:
 		main.import_lp1_map(map_pick.get_selected_metadata(), out, name_edit.text.strip_edges())

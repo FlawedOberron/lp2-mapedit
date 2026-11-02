@@ -26,6 +26,7 @@ var _node: Node3D = null   # the marker being placed
 var _press := Vector2.ZERO
 var _origin := Vector3.ZERO
 var _copies: Array = []    # the placed marker's data and its copies in the other layouts
+var _quick: Node3D = null  # Quick place (Q): the selected marker the next click moves (then drag to aim)
 
 func _twin_sets(i: int) -> Array:
 	# the other layouts' sets with the same LP1 mode digits (ids 00 10 30 40 -> 01 11 31 41 ...)
@@ -156,7 +157,19 @@ func _thumb_key(t: Array) -> String:
 	return "vs_%02x" % t[0]
 
 func placing() -> bool:
-	return visible or _node != null
+	return visible or _node != null or _quick != null
+
+func quick(n: Node3D) -> void:
+	# Quick place: the next click puts this marker there, a drag aims it (about the up axis), Esc cancels
+	_quick = n
+	main.set_status("Quick place: click where it goes, drag to aim (Ctrl or Snap: 15° steps). Esc cancels.")
+
+func cancel_quick() -> bool:
+	if _quick == null:
+		return false
+	_quick = null
+	main.set_status("Quick place cancelled")
+	return true
 
 func _marker_data() -> Variant:
 	var i := item_pick.selected
@@ -182,6 +195,9 @@ func _marker_data() -> Variant:
 # main._unhandled_input hands mouse events here first while placing; true = used
 func handle(e: InputEvent) -> bool:
 	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT:
+		if e.pressed and _quick:
+			_begin_quick(e.position)
+			return true
 		if e.pressed and visible:
 			_begin(e.position)
 			return true
@@ -227,6 +243,20 @@ func _begin(mp: Vector2) -> void:
 			main.layout["sets"][j]["objects" if d["role"] in ["weapon", "vs"] else "points"].append(c)
 			_copies.append(c)
 	_node = main.markers_root.get_child(main.markers_root.get_child_count() - 1)
+	_press = mp
+
+func _begin_quick(mp: Vector2) -> void:
+	var hit: Dictionary = main._mouse_ray(mp, 1 << (main.LAYER_STAGE - 1))
+	if not hit:
+		main.set_status("Nothing of the level under the mouse: click on the map (Esc cancels)")
+		return
+	main._push_undo("")
+	_node = _quick
+	_quick = null
+	_origin = hit["position"]
+	_node.global_position = _origin + Vector3(0, 5.0 * main.CM, 0)   # 5 cm up, as placed markers
+	main._store_marker(_node)
+	_copies = []
 	_press = mp
 
 func _aim(mp: Vector2) -> void:
@@ -290,3 +320,5 @@ func _end() -> void:
 	main._update_stats()
 	main.log_line("Placed %s (yaw %.0f°)%s." % [main._marker_label(n.get_meta("data"), n.get_meta("object")), n.rotation_degrees.y,
 		" on %d layouts" % _copies.size() if _copies.size() > 1 else ""])
+	if not visible:   # a Quick place (the Place window is closed)
+		main.set_status("Placed")
