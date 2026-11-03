@@ -1,5 +1,6 @@
 extends Window
-# Floating mesh builder (lp2-tools/lp2mesh.py): OBJ / glTF files become the project's imported meshes, placed like
+# Mesh builder (lp2-tools/lp2mesh.py), shown as the Browser's "Mesh builder" tab (browser.add_builder moves this
+# window's page and dialogs there; the window itself is never shown): OBJ / glTF files become the project's imported meshes, placed like
 # library pieces; the project's materials (colour / normal / specular mask -> game textures) are shared between
 # them, so a trim sheet loads once per map.
 
@@ -13,6 +14,9 @@ var import_list: ItemList
 var imp_info: Label
 var imp_collision: OptionButton
 var imp_scale: SpinBox
+var imp_unwrap: SpinBox
+var imp_blockout: CheckButton
+var _showing := false       # _show_import filling the fields (no rebuild)
 var imp_slots: GridContainer
 var imp_split: CheckBox
 var set_button: Button
@@ -104,7 +108,20 @@ func setup(m: Node, t: Node) -> void:
 	imp_scale.value = 100.0
 	imp_scale.tooltip_text = "Game centimetres per file unit (100: the file is in metres)"
 	g.add_child(imp_scale)
+	g.add_child(main._label("UV unwrap"))
+	imp_unwrap = main._spin(0.0, 100.0, 0.25)
+	imp_unwrap.suffix = "m"
+	imp_unwrap.tooltip_text = "Box-projected UVs, metres per texture tile (0: the file's own UVs). For meshes without a proper unwrap, e.g. a whitebox"
+	g.add_child(imp_unwrap)
 	v.add_child(g)
+	var urow := HBoxContainer.new()
+	main._button(urow, "Lazy unwrap", lazy_unwrap).tooltip_text = "Give the mesh box-projected UVs (1 m tiles unless UV unwrap says otherwise), so grids and tiling textures sit right; rebuilds it"
+	imp_blockout = CheckButton.new()
+	imp_blockout.text = "Blockout"
+	imp_blockout.tooltip_text = "Colour the mesh by facing instead of its materials: walkable floors orange, walls grey-white, ceilings dark grey (1 m grids; the project materials blockout_floor / _wall / _ceiling, recolour them like any other). Off: the file's materials again. Rebuilds it"
+	imp_blockout.toggled.connect(func(_on): if not _showing: apply_import())
+	urow.add_child(imp_blockout)
+	v.add_child(urow)
 	v.add_child(main._label("Materials (the file's material -> a project material):"))
 	imp_slots = GridContainer.new()
 	imp_slots.columns = 2
@@ -182,7 +199,7 @@ func setup(m: Node, t: Node) -> void:
 	var brow := HBoxContainer.new()
 	main._button(brow, "New", new_material).tooltip_text = "Clear the fields for a new material"
 	main._button(brow, "Apply", apply_material).tooltip_text = "Build the game textures (the meshes using it are rebuilt)"
-	main._button(brow, "Blockout", make_blockout).tooltip_text = "A dev-style grid colour map in the material's colour (orange for a new one): 1 m tiles, white lines every 1 m / 25 cm / 12.5 cm, Grid UVs 1 m"
+	main._button(brow, "Grid texture", make_blockout).tooltip_text = "Make this material a blockout grid (to colour a mesh by facing, use Blockout on the mesh above): a dev-style grid colour map in the material's colour (orange for a new one): 1 m tiles, white lines every 1 m / 25 cm / 12.5 cm, Grid UVs 1 m"
 	v.add_child(brow)
 	mat_info = main._label("")
 	mat_info.autowrap_mode = TextServer.AUTOWRAP_WORD
@@ -205,7 +222,12 @@ func setup(m: Node, t: Node) -> void:
 		mat_files[_image_kind].text = p.get_file()
 		_preview())
 	add_child(image_dialog)
-	visibility_changed.connect(func(): if visible: refresh())
+
+func is_open() -> bool:
+	return main.browser.visible and main.browser.tabs.current_tab == main.browser.builder_tab
+
+func open(key: String = "") -> void:
+	main.browser.show_builder(key)
 
 func _heading(t: String) -> Label:
 	var l: Label = main._label(t)
@@ -319,7 +341,13 @@ func _show_import() -> void:
 			" (no longer in the file: re-import keeps it as it was)" if info.get("missing", false) else ""]
 	imp_collision.select(maxi(0, COLLISION.find(info.get("collision", "mesh"))))
 	imp_scale.value = float(info.get("scale", 100.0))
-	var slots: Dictionary = info.get("slots", {})
+	imp_unwrap.value = float(info.get("unwrap", 0.0))
+	_showing = true
+	imp_blockout.button_pressed = bool(info.get("blockout", false))
+	_showing = false
+	var slots: Dictionary = {} if info.get("blockout", false) else info.get("slots", {})
+	if info.get("blockout", false):
+		imp_slots.add_child(main._label("Blockout: by facing (blockout_floor / _wall / _ceiling)"))
 	for s in slots:
 		imp_slots.add_child(main._label(s if s != "" else "(no material)"))
 		var o := OptionButton.new()
@@ -432,11 +460,16 @@ func apply_import() -> void:
 	if a.is_empty():
 		return
 	var args := ["rebuild", "--game", main.game, _proj(), a["name"], "--collision", COLLISION[imp_collision.selected],
-		"--scale", str(imp_scale.value)]
+		"--scale", str(imp_scale.value), "--unwrap", str(imp_unwrap.value), "--blockout", "1" if imp_blockout.button_pressed else "0"]
 	for o in imp_slots.get_children():
 		if o is OptionButton and o.selected >= 0:
 			args += ["--mat", "%s=%s" % [o.get_meta("slot"), o.get_item_text(o.selected)]]
 	_rebuild(a, args)
+
+func lazy_unwrap() -> void:
+	if imp_unwrap.value <= 0.0:
+		imp_unwrap.value = 1.0
+	apply_import()
 
 func reimport_selected() -> void:
 	var a := _selected_import()
@@ -469,6 +502,7 @@ func _rebuild(a: Dictionary, args: Array) -> void:
 	_tool(args, func():
 		main.geometry.refresh_import(rel)
 		main._stats_later()
+		main.set_status("Rebuilt %s" % a["name"])
 		main.log_line("Rebuilt %s; its placed copies follow." % a["name"]))
 
 func place_selected() -> void:
@@ -593,7 +627,8 @@ func apply_material(extra: Array = []) -> void:
 		args += ["--" + kind, _pending[kind]]
 	var users: Array = []
 	for a in main.library.imports():
-		if (a["info"] as Dictionary).get("slots", {}).values().has(n):
+		var info: Dictionary = a["info"]
+		if info.get("slots", {}).values().has(n) or (info.get("blockout", false) and n in ["blockout_floor", "blockout_wall", "blockout_ceiling"]):
 			users.append(a["map"])
 	main.set_status("Building material %s..." % n)
 	mat_name.text = n
@@ -601,4 +636,5 @@ func apply_material(extra: Array = []) -> void:
 		_pending = {}
 		for rel in users:
 			main.geometry.refresh_import(rel)
+		main.set_status("Material %s built" % n)
 		main.log_line("Material %s built%s." % [n, (" (%d meshes rebuilt)" % users.size()) if users.size() else ""]))

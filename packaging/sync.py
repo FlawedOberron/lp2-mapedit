@@ -9,7 +9,7 @@ tools/ gets only what the editor needs: the scripts it runs (ENTRY) and everythi
 import argparse, os, re, shutil, sys
 
 ENTRY = ["runtool", "lp2col", "lp2colview", "lp2library", "lp2light", "lp2mapc", "lp2mesh", "lp2pieces",
-         "lp2preview", "lp2sky", "lp2project", "lp2convert"]
+         "lp2preview", "lp2sky", "lp2project", "lp2convert", "lp2navmap", "lp2radar"]
 EDITOR_FILES = re.compile(r".*\.(gd|gdshader|uid|tscn|godot|svg|png)$|^README\.md$|^run\.sh$|^export_presets\.cfg$")
 
 
@@ -43,9 +43,14 @@ def main():
             for f in os.listdir(out):
                 if f not in keep and os.path.isfile(os.path.join(out, f)):
                     os.remove(os.path.join(out, f))
+                elif sub == "tools" and os.path.isdir(os.path.join(out, f)):
+                    shutil.rmtree(os.path.join(out, f))
         os.makedirs(out, exist_ok=True)
         for f in files:
-            shutil.copy2(os.path.join(src, f), os.path.join(out, f))
+            if os.path.isdir(os.path.join(src, f)):   # a data folder (navgen/: the navmesh builder, both platforms)
+                shutil.copytree(os.path.join(src, f), os.path.join(out, f))
+            else:
+                shutil.copy2(os.path.join(src, f), os.path.join(out, f))
         print(f"{sub}/: {len(files)} files")
 
 

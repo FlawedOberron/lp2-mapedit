@@ -20,6 +20,11 @@ extends Node
 #                     a one-way wall: those ticked may cross the box along its arrow only (its yaw, as markers'); going
 #                     back through it, characters are held, bullets and grenades vanish (map.json "oneway_volumes", xlive
 #                     mod oneway.cpp)
+#   "limits": true    map limits: marks the playable space, no effect in the game. Several (or one with extra boxes) make
+#                     an odd shape: inside any of them counts. With any limits volume, the navmesh keeps only what's
+#                     inside (lp2navmap.py); later also the radar's extent
+#   "barrier": true   an invisible wall / roof: the box goes into the movement collision only (lp2mapc.py), so players
+#                     and VS are stopped while bullets (and, it's expected, the grapple, which aims with them) pass
 #   "sound": {"reverb": key}  the game's reverb inside (a stock map's preset, REVERBS; lp2sound.py: the game's own
 #                     sound zones, no xlive mod); outside, the map's own (environment "sound": {"reverb"}, else the base map's)
 # A volume's "pos" is the centre of its floor (cm, like markers), "size" its extent (cm), "yaw" its turn about y
@@ -33,12 +38,13 @@ extends Node
 const COLOURS := {"kill": Color(0.95, 0.15, 0.15), "gravity": Color(0.25, 0.55, 1.0), "post": Color(0.75, 0.35, 1.0),
 	"weather": Color(0.3, 0.85, 0.8), "water": Color(0.15, 0.4, 0.95), "sound": Color(0.95, 0.7, 0.2),
 	"damage": Color(1.0, 0.45, 0.05), "marker": Color(1.0, 0.9, 0.2),
-	"oneway": Color(0.3, 1.0, 0.45),
-	"none": Color(0.6, 0.6, 0.6)}
+	"oneway": Color(0.3, 1.0, 0.45), "limits": Color(0.85, 0.85, 0.95),
+	"barrier": Color(0.55, 0.75, 1.0), "none": Color(0.6, 0.6, 0.6)}
 const ADD := [["kill", "Kill volume (pit)"], ["gravity", "Gravity volume"], ["post", "Post-process volume (screen colour)"],
 	["weather", "Weather limiter volume (indoors)"], ["water", "Water volume (surface at its top)"],
 	["sound", "Sound volume (reverb zone)"], ["damage", "Damage volume (lava, fire)"],
-	["marker", "Script marker (a named point for scripts)"], ["oneway", "One-way wall (pass along its arrow only)"]]
+	["marker", "Script marker (a named point for scripts)"], ["oneway", "One-way wall (pass along its arrow only)"],
+	["limits", "Map limits (marks the level's bounds)"], ["barrier", "Barrier (invisible wall / roof, no grapple)"]]
 const ONEWAY := {"players": true, "vs": true, "bullets": false, "grenades": false, "akrid": false}   # a new one
 const ONEWAY_NAMES := [["players", "Players"], ["vs", "VS"], ["bullets", "Bullets"], ["grenades", "Grenades"], ["akrid", "Akrid"]]
 const DAMAGE := {"player": 0.0, "vs": 10.0, "player_kill": true, "vs_kill": false}   # a new one: lava
@@ -59,6 +65,8 @@ var gravity_on: CheckBox
 var post_on: CheckBox
 var weather_on: CheckBox
 var water_on: CheckBox
+var limits_on: CheckBox
+var barrier_on: CheckBox
 var damage_on: CheckBox
 var damage_rows: Array = []  # the damage controls, shown while it's on
 var damage_spins := {}       # player / vs: % per second
@@ -120,6 +128,12 @@ func setup(m: Node, right: VBoxContainer) -> void:
 	g.add_child(weather_spin)
 	water_on = _check(g, "Water", "Water up to the box's top: players inside are underwater (lighter, as on stock water maps; "
 		+ "weapons and effects act underwater). No visible surface yet (xlive mod)")
+	g.add_child(Control.new())
+	limits_on = _check(g, "Map limits", "Marks the level's bounds (no effect in the game). Several, or one with extra boxes "
+		+ "(Ctrl+Shift+drag a face), make an odd shape: inside any counts. The navmesh keeps only what's inside them")
+	g.add_child(Control.new())
+	barrier_on = _check(g, "Barrier", "An invisible wall or roof: players and VS can't pass it; bullets fly through and the grapple "
+		+ "can't hook onto it. Thin boxes work best; Ctrl+drag a face to size it")
 	g.add_child(Control.new())
 	damage_on = _check(g, "Damage", "Damage over time inside, separately for players and VS: % of full health per second, or Kill "
 		+ "at once (e.g. lava: kills players, burns VS). Uses the game's burning damage (xlive mod)")
@@ -338,6 +352,10 @@ static func effects(d: Dictionary) -> Array:
 		out.append("damage")
 	if d.get("oneway"):
 		out.append("oneway")
+	if d.get("limits", false):
+		out.append("limits")
+	if d.get("barrier", false):
+		out.append("barrier")
 	return out
 
 static func reverb_name(key: String) -> String:
@@ -354,6 +372,8 @@ static func label(d: Dictionary) -> String:
 			else "reverb: " + reverb_name(str(d["sound"].get("reverb", ""))).get_slice(" (", 0) if e == "sound"
 			else "damage" if e == "damage"
 			else "one-way" if e == "oneway"
+			else "map limits" if e == "limits"
+			else "barrier" if e == "barrier"
 			else "marker " + str(d["marker"]) if e == "marker"
 			else "no weather" if float(d["weather"]) <= 0.0 else "weather %d%%" % int(d["weather"]))
 	var nb: int = (d.get("boxes", []) as Array).size()
@@ -566,6 +586,12 @@ func place_volume(effect: String, at: Vector3) -> Node3D:
 		"marker":
 			d["marker"] = unique_marker("marker_1")
 			d["size"] = [100.0, 200.0, 100.0]
+		"limits":
+			d["limits"] = true
+			d["size"] = [10000.0, 5000.0, 10000.0]
+		"barrier":
+			d["barrier"] = true
+			d["size"] = [1000.0, 600.0, 20.0]   # a thin wall
 		"oneway":
 			d["oneway"] = ONEWAY.duplicate()
 			d["size"] = [1000.0, 600.0, 100.0]   # a thin wall
@@ -631,6 +657,8 @@ func show_inspector(selection: Array) -> void:
 	remove_box.disabled = nb == 0
 	weather_on.button_pressed = d.has("weather")
 	water_on.button_pressed = d.get("water", false)
+	limits_on.button_pressed = d.get("limits", false)
+	barrier_on.button_pressed = d.get("barrier", false)
 	sound_on.button_pressed = d.get("sound") != null
 	var rk: String = str((d.get("sound") if d.get("sound") else {}).get("reverb", REVERBS[0][0]))
 	reverb_pick.selected = maxi(0, REVERBS.map(func(r): return r[0]).find(rk))
@@ -692,6 +720,14 @@ func _on_changed() -> void:
 		d["water"] = true
 	else:
 		d.erase("water")
+	if limits_on.button_pressed:
+		d["limits"] = true
+	else:
+		d.erase("limits")
+	if barrier_on.button_pressed:
+		d["barrier"] = true
+	else:
+		d.erase("barrier")
 	if sound_on.button_pressed:
 		d["sound"] = {"reverb": REVERBS[reverb_pick.selected][0]}
 	else:

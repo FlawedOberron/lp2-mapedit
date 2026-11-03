@@ -4,9 +4,10 @@ extends Window
 # go into the shown marker set with "placed": true (lp2layout.py: VS / weapons beyond the stock count are copies
 # of the stock records; spawns fill the stock rInitPosSet counts by role, so extra ones are not exported yet).
 
-const KINDS := ["Spawn point", "Weapon pickup", "VS", "Volume"]
+const KINDS := ["Spawn point", "Weapon pickup", "VS", "Volume", "Data post"]
 const SPAWNS := [["start", 1, "Free-for-all start"], ["team_a", 20, "Team A (red)"], ["team_b", 21, "Team B (blue)"],
-	["team_c", 22, "Team C"], ["team_d", 23, "Team D"], ["k40", 40, "Spare point (k40: weapons fill these)"]]
+	["team_c", 22, "Team C"], ["team_d", 23, "Team D"], ["k30", 30, "Team A base (red sphere; VS mode)"],
+	["k31", 31, "Team B base (blue sphere; VS mode)"], ["k40", 40, "Free-for-all / Fugitive point (green sphere)"]]
 const AIM_PX := 6.0        # drag this far before the mouse aims the marker
 const SNAP_DEG := 15.0
 const SNAP_CM := 50.0
@@ -130,6 +131,8 @@ func _fill_items() -> void:
 		3:
 			for a in main.volumes.ADD:
 				item_pick.add_item(a[1])
+		4:   # lp2layout.patch_objset: a copy of the base map's post record (Data Post layouts) at each one
+			item_pick.add_item("Data post (Data Post game type)")
 	item_pick.select(0)
 
 func _fill_vs() -> void:
@@ -190,6 +193,8 @@ func _marker_data() -> Variant:
 				main.set_status("Pick a VS in the Place window first.")
 				return null
 			return {"kind": 1, "role": "vs", "model": "vs%02x" % _shown[sel[0]][0], "placed": true}
+		4:
+			return {"kind": 3, "role": "object", "model": "om7100", "placed": true}
 	return null
 
 # main._unhandled_input hands mouse events here first while placing; true = used
@@ -199,6 +204,13 @@ func handle(e: InputEvent) -> bool:
 			_begin_quick(e.position)
 			return true
 		if e.pressed and visible:
+			if Time.get_ticks_msec() - _last_place < CLICK_GAP_MS:   # a twitch / bounce right after a placement
+				return true
+			var at := _existing(e.position)
+			if at:   # a marker already there (or the second click of a double click): select it, don't stack another
+				main.select([at])
+				main.set_status("Selected %s (click empty ground to place)" % main._marker_label(at.get_meta("data"), at.get_meta("object")) if at.has_meta("data") and not at.has_meta("light") else "Selected")
+				return true
 			_begin(e.position)
 			return true
 		if not e.pressed and _node:
@@ -208,6 +220,35 @@ func handle(e: InputEvent) -> bool:
 		_aim(e.position)
 		return true
 	return false
+
+const CLICK_GAP_MS := 200   # clicks this soon after a placement are ignored (no accidental second copy)
+var _last_place := 0
+const POST_GAP := 1.5   # m: placing a post this close to another selects that one instead (they'd overlap)
+
+func _existing(mp: Vector2) -> Node3D:
+	# the marker under the mouse (spawns, pickups, VS, posts, lights; not volumes or terrain, which are placed into),
+	# or, placing a post, the post nearest where it would go if one is within POST_GAP
+	var n: Node3D = main._pick(mp)
+	if n and main._is_marker(n) and not n.has_meta("volume") and not n.has_meta("terrain"):
+		return n
+	if kind_pick.selected != 4:
+		return null
+	var hit: Dictionary = main._mouse_ray(mp, 1 << (main.LAYER_STAGE - 1))
+	if not hit:
+		return null
+	var best: Node3D = null
+	var best_d := POST_GAP
+	for m in main.markers_root.get_children():
+		if m.has_meta("data") and m.get_meta("object") and (m.get_meta("data") as Dictionary).get("role", "") == "object":
+			var d: float = m.global_position.distance_to(hit["position"])
+			if d < best_d:
+				best_d = d
+				best = m
+	return best
+
+func _unhandled_key_input(e: InputEvent) -> void:
+	# keys pressed while this window has the focus (W / E / R, Q, F, Delete...) work as in the view
+	main._unhandled_input(e)
 
 func _begin(mp: Vector2) -> void:
 	if main.set_index < 0 and kind_pick.selected != 3:
@@ -234,13 +275,17 @@ func _begin(mp: Vector2) -> void:
 	d["pos"] = [_origin.x / main.CM, _origin.y / main.CM + 5.0, _origin.z / main.CM]
 	d["yaw"] = snappedf(rad_to_deg(atan2(-fwd.x, -fwd.z)), 0.01)
 	var s: Dictionary = main.layout["sets"][main.set_index]
-	s["objects" if d["role"] in ["weapon", "vs"] else "points"].append(d)
-	main._add_marker(d, d["role"] in ["weapon", "vs"])
+	if d["role"] == "object":
+		d["post"] = main.next_post_number(s)
+	s["objects" if d["role"] in main.OBJECT_ROLES else "points"].append(d)
+	main._add_marker(d, d["role"] in main.OBJECT_ROLES)
 	_copies = [d]
 	if all_layouts.button_pressed:
 		for j in _twin_sets(main.set_index):
 			var c: Dictionary = d.duplicate(true)
-			main.layout["sets"][j]["objects" if d["role"] in ["weapon", "vs"] else "points"].append(c)
+			if d["role"] == "object":
+				c["post"] = main.next_post_number(main.layout["sets"][j])
+			main.layout["sets"][j]["objects" if d["role"] in main.OBJECT_ROLES else "points"].append(c)
 			_copies.append(c)
 	_node = main.markers_root.get_child(main.markers_root.get_child_count() - 1)
 	_press = mp
@@ -307,12 +352,14 @@ func _end() -> void:
 	if _node.has_meta("volume"):
 		var v := _node
 		_node = null
+		_last_place = Time.get_ticks_msec()
 		main._rebuild_outliner()
 		main.select([v])
 		main.log_line("Placed %s." % main.volumes.label(v.get_meta("data")))
 		return
 	main._store_marker(_node)
 	_sync_copies()
+	_last_place = Time.get_ticks_msec()
 	var n := _node
 	_node = null
 	main._rebuild_outliner()

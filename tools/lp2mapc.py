@@ -29,7 +29,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import arcx, lp2bake, lp2clean, lp2col, lp2pieces, lp2project, lp2scenebox, lp2stage, lp2weather, mapslot, sbc  # noqa: E402
-import lp2sound  # noqa: E402
+import lp2radar, lp2sound  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ARCS = {"main": "arcXmlTmpPC/aArea_ONLINE_00.arc", "v": "arcXmlTmpPC/variable/aArea_ONLINE_00_v.arc",
@@ -74,10 +74,10 @@ def base(name):
     return name.split("\\")[-1]
 
 
-def put(arc, files):
-    """arcput.py in place: files = {NAME.CLASS: path}."""
+def put(arc, files, add=False):
+    """arcput.py in place: files = {NAME.CLASS: path}; add: names (full paths) not in it become new entries."""
     if files:
-        tool("arcput.py", arc, arc + ".new", *(f"{k}={v}" for k, v in files.items()))
+        tool("arcput.py", *(["--add"] if add else []), arc, arc + ".new", *(f"{k}={v}" for k, v in files.items()))
         os.replace(arc + ".new", arc)
 
 
@@ -152,6 +152,13 @@ def volume_box(v):
     cs = volume_corners(v)
     return ([min(c[0] for c in cs), lo[1], min(c[1] for c in cs)],
             [max(c[0] for c in cs), hi[1], max(c[1] for c in cs)])
+
+
+def barrier_groups(p):
+    """barrier volumes ("barrier": true) as closed boxes for the movement collision only: players and VS stop,
+    bullets (and the grapple, which aims with the bullet collision) pass"""
+    return [lp2col.box(volume_corners(v), volume_local(v)[0][1], volume_local(v)[1][1]) for v in all_parts(p)
+            if v.get("barrier")]
 
 
 def volume_kill(v):
@@ -629,10 +636,33 @@ def add_weather(game, A, env, W, log=print):
         f"{len(w.get('volumes') or [])} no-weather volumes")
 
 
-def strip_base(A, stock, env, W, log=print):
+def off_mesh_warning(folder, p, tris, log=print):
+    """the layout's spawn points with no playable navmesh under them (on a roof, outside the map, in the air): the
+    game spawns players there all the same"""
+    A, B, C = tris[:, 0], tris[:, 1], tris[:, 2]
+    d = (B[:, 2] - C[:, 2]) * (A[:, 0] - C[:, 0]) + (C[:, 0] - B[:, 0]) * (A[:, 2] - C[:, 2])
+    ok = np.abs(d) > 1e-6
+    d = np.where(ok, d, 1)
+    lay = json.load(open(lp2project.path(folder, p["layout"]["file"])))
+    for k, st in enumerate(lay.get("sets", [])):
+        bad = 0
+        for q in st.get("points", []):
+            x, y, z = q["pos"]
+            l1 = ((B[:, 2] - C[:, 2]) * (x - C[:, 0]) + (C[:, 0] - B[:, 0]) * (z - C[:, 2])) / d
+            l2 = ((C[:, 2] - A[:, 2]) * (x - C[:, 0]) + (A[:, 0] - C[:, 0]) * (z - C[:, 2])) / d
+            l3 = 1 - l1 - l2
+            h = l1 * A[:, 1] + l2 * B[:, 1] + l3 * C[:, 1]
+            bad += not (ok & (l1 >= -1e-3) & (l2 >= -1e-3) & (l3 >= -1e-3) & (h <= y + 50) & (h >= y - 400)).any()
+        if bad:
+            log(f"WARNING: layout {'/'.join(map(str, st.get('ids', [k])))}: {bad} of {len(st.get('points', []))} spawn "
+                f"points have no playable navmesh under them (players spawn there: roof, outside, mid-air)")
+
+
+def strip_base(A, stock, env, W, log=print, radar=None):
     """the base map's own visible resources out of the package (lp2clean.py): scenery list entries (water planes,
     falling ash, underwater effect unless the project has water), placed field effects, trigger zones, the water
-    scheduler, the radar map images"""
+    scheduler, the radar map images. radar (lp2radar.build): the project's radar in their place, its floor zones
+    the only trigger zones."""
     m = stock["main"]
     d = W("clean")
     os.makedirs(d, exist_ok=True)
@@ -651,6 +681,8 @@ def strip_base(A, stock, env, W, log=print):
         files_k = {}
         for nm, b in stock[k].get("rAreaHitLayout", []):
             data, n = lp2clean.areahit(b)
+            if radar:
+                data, n = lp2radar.zones(b, radar["planes"], radar["boxes"], *radar["height"])
             q = os.path.join(d, k + "_" + base(nm) + ".rAreaHitLayout")
             open(q, "wb").write(data)
             files_k[base(nm) + ".rAreaHitLayout"] = q
@@ -658,7 +690,7 @@ def strip_base(A, stock, env, W, log=print):
             put(A["v"], files_k)
         else:
             files.update(files_k)
-            notes.append(f"{n} trigger zones")
+            notes.append(f"{n} radar zones" if radar else f"{n} trigger zones")
     for nm, b in m.get("rFieldSet", []):
         data, n = lp2clean.fieldset(b)
         out(base(nm) + ".rFieldSet", data)
@@ -669,12 +701,28 @@ def strip_base(A, stock, env, W, log=print):
         if base(nm).lower() == "on00_water" and root_only:
             out(base(nm) + ".rScheduler", lp2clean.empty_scheduler(root_only))
             notes.append("water scheduler")
-    radar = [(nm, b) for nm, b in m.get("rTexture", []) if "rader_map" in nm.lower()]
-    for nm, b in radar:
-        out(base(nm) + ".rTexture", lp2clean.blank_texture(b))
-    if radar:
-        notes.append(f"{len(radar)} radar images blanked")
+    images = {base(nm).lower(): b for nm, b in m.get("rTexture", []) if "rader_map" in nm.lower()}
+    new = {}
+    if radar:   # ours as _1.._n (past stock's five: new entries), the movie and its dependency list to match
+        n = len(radar["images"])
+        for k, img in enumerate(radar["images"]):
+            nm = lp2radar.IMAGE.format(k + 1)
+            q = os.path.join(d, nm + ".rTexture")
+            open(q, "wb").write(lp2radar.texture(img))
+            if images.pop(nm.lower(), None) is not None:
+                files[nm + ".rTexture"] = q
+            else:
+                new[lp2radar.IMAGE_DIR + nm + ".rTexture"] = q
+        movie = next(b for nm, b in m["rFlash"] if "rader_map" in nm.lower())
+        out(base(lp2radar.NAME) + ".rFlash", lp2radar.movie(movie, n, radar["place"], radar["size"]))
+        out(base(lp2radar.NAME) + ".rArchive", lp2radar.archive(n))
+        notes.append(f"radar: {n} floor image{'s' if n > 1 else ''}")
+    for nm, b in images.items():   # the rest blank
+        out(nm + ".rTexture", lp2clean.blank_texture(b))
+    if images and not radar:
+        notes.append(f"{len(images)} radar images blanked")
     put(A["main"], files)
+    put(A["main"], new, add=True)
     log("base map leftovers removed: " + ", ".join(notes))
 
 
@@ -740,7 +788,15 @@ def compile_project(game, folder, out_zip, work=None, log=print, library=None):
         stock_package(game, pkg, stock_no)
         A = {k: os.path.join(pkg, "nativePC", v) for k, v in ARCS.items()}
         stock = {k: entries(v) for k, v in A.items()}
-        strip_base(A, stock, env, W, log)
+        radar = lp2radar.build(folder, p, log)
+        if radar:
+            off_mesh_warning(folder, p, radar["tris"], log)
+            radar["boxes"] = lp2radar.zone_boxes(p, radar["tris"])
+            y = radar["tris"][..., 1]
+            radar["height"] = (float(y.min()) - 5000.0, float(y.max()) + 5000.0)
+        else:
+            log("radar: no navmesh, the radar stays blank (build one in the Navmesh window)")
+        strip_base(A, stock, env, W, log, radar)
         add_weather(game, A, env, W, log)
         tmpl = {}
         os.makedirs(W("tmpl"), exist_ok=True)
@@ -784,7 +840,10 @@ def compile_project(game, folder, out_zip, work=None, log=print, library=None):
                 f"{len(geo.get('copies') or [])} copies")
         if lp2bake.settings(p)["source"] == "bake":   # our ray-traced light instead of the LP1 lightmap's
             report(0.57, "baking the lighting")
-            lp2bake.bake_stage(os.path.join(stage, *STAGE_DIR.split("\\"), "online00.rModel"), folder, p, log)
+            dyn = None
+            if pieces is not None and any(lp2pieces.dynamic_parts(geo)):
+                dyn = lp2pieces.dynamic_points(pieces[0], pieces[1], geo, library, folder)
+            lp2bake.bake_stage(os.path.join(stage, *STAGE_DIR.split("\\"), "online00.rModel"), folder, p, log, dyn)
         sky = env.get("skybox") or {"type": "map"}
         if sky.get("type") in ("stock", "panorama"):
             report(0.58, "sky")
@@ -813,19 +872,21 @@ def compile_project(game, folder, out_zip, work=None, log=print, library=None):
         files = {}
         kill = p.get("environment", {}).get("kill_floor")
         kills = [(volume_corners(v), volume_local(v)[1][1]) for v in all_parts(p) if volume_kill(v)]
+        barriers = barrier_groups(p)
         for key, n in (("lp1_move", "atarionline00"), ("lp1_bullet", "tamaonline00")):
             out = W(n + ".rCollision")
             # cached by everything it's made from (the LP1 collision, the template, the stage's LP1 models and the
             # geometry edits for the pieces, the kill settings, the code)
             ck = collision_key(P(p["collision"][key]), tmpl[n], models if pieces else [], geo if pieces else {},
-                               kill if key == "lp1_bullet" else None, kills if key == "lp1_bullet" else [], library)
+                               kill if key == "lp1_bullet" else None,
+                               kills if key == "lp1_bullet" else [b["verts"] for b in barriers], library)
             hit = os.path.join(cache_dir("collision"), ck + ".rCollision")
             if os.path.exists(hit):
                 shutil.copyfile(hit, out)
                 log(f"  {n}: unchanged, from the cache")
                 files[f"{tag}\\{n}.rCollision"] = out
                 continue
-            if pieces or ((kill is not None or kills) and key == "lp1_bullet"):
+            if pieces or ((kill is not None or kills) and key == "lp1_bullet") or (barriers and key == "lp1_move"):
                 groups = lp2col.read_sbc1(open(P(p["collision"][key]), "rb").read())
                 if pieces:
                     groups, (mv, dr, cp) = lp2pieces.apply_collision(groups, *pieces, geo)
@@ -838,6 +899,9 @@ def compile_project(game, folder, out_zip, work=None, log=print, library=None):
                     # the game's kill floor: a 0x200 surface quad in the bullet collision (lp2col.kill_quad)
                     groups.append(lp2col.kill_quad(groups, float(kill)))
                     log(f"  {n}: kill floor at {float(kill) / 100:.1f} m")
+                if barriers and key == "lp1_move":
+                    groups += barriers
+                    log(f"  {n}: {len(barriers)} barrier(s)")
                 if kills and key == "lp1_bullet":
                     # kill volumes: the same kill surface over each box's top (the game only checks while falling)
                     for corners, top in kills:

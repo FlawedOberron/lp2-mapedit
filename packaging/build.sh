@@ -18,7 +18,7 @@ rm -rf "$WORK" && mkdir -p "$WORK" "$DIST"
 
 tools() {   # $1: destination; the tools, byte-compiled with the bundle's Python where it can run
 	mkdir -p "$1/tools"
-	cp "$REPO"/tools/* "$1/tools/"
+	cp -r "$REPO"/tools/* "$1/tools/"
 }
 
 # ---- Godot exports (import first: a fresh checkout has no .godot/)

@@ -595,7 +595,7 @@ func bake_now() -> void:
 	main.save_project()   # the bake reads the project from disk
 	bake_btn.disabled = true
 	main.set_status("Baking the lighting...")
-	main.run_tool("lp2bake.py", [main.project_dir], func():
+	main.run_tool("lp2bake.py", [main.project_dir, "--library", main.library_dir], func():
 		bake_btn.disabled = false
 		main.load_stage(false)
 		main.set_status("Lighting baked"))
@@ -849,7 +849,7 @@ func light_menu(n: Node3D, at: Vector2) -> void:
 	light_popup.reset_size()
 	var win: Vector2 = main.get_viewport().get_visible_rect().size
 	var sz := Vector2(light_popup.size)
-	light_popup.popup(Rect2i(Vector2i(at.clamp(Vector2.ZERO, (win - sz).max(Vector2.ZERO))), Vector2i(sz)))
+	light_popup.popup(Rect2i(main.popup_origin() + Vector2i(at.clamp(Vector2.ZERO, (win - sz).max(Vector2.ZERO))), Vector2i(sz)))
 
 func _popup_act(f: Callable) -> void:
 	light_popup.hide()

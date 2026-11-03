@@ -11,6 +11,8 @@ var prefab_list: ItemList
 var level_list: ItemList
 var filter: LineEdit
 var tabs: TabContainer
+var builder_tab := -1      # the Mesh builder's tab (add_builder)
+var builder_key := ""     # the custom mesh it opens (the last one picked)
 var asset_list: ItemList
 var asset_group: OptionButton
 var asset_filter: LineEdit
@@ -123,7 +125,51 @@ func setup(m: Node, t: Node) -> void:
 	ga.add_child(asset_info)
 	tabs.add_child(ga)
 	visibility_changed.connect(_on_shown)
-	tabs.tab_changed.connect(func(_t): if visible: refresh())
+	tabs.tab_changed.connect(func(t):
+		if not visible:
+			return
+		if t == builder_tab:
+			_on_builder_shown()
+		else:
+			refresh())
+	prefab_list.item_selected.connect(func(i):
+		var it := _mine(i)
+		if it.size() and it[0] == "mesh":
+			offer_builder(it[1]))
+
+func add_builder(mb: Window) -> void:
+	# the mesh builder's page as a tab (hidden until a custom mesh is picked), its dialogs with it
+	for c in mb.get_children():
+		mb.remove_child(c)
+		if c is Window:
+			add_child(c)
+		else:
+			c.name = "Mesh builder"
+			tabs.add_child(c)
+			builder_tab = tabs.get_tab_count() - 1
+	tabs.set_tab_hidden(builder_tab, true)
+
+func offer_builder(key: String) -> void:
+	# a custom mesh picked (My assets or In the level): the Mesh builder tab shows, opening that mesh
+	builder_key = key
+	tabs.set_tab_hidden(builder_tab, false)
+	tabs.set_tab_tooltip(builder_tab, "%s in the Mesh builder (M)" % key.trim_prefix("imp_"))
+
+func show_builder(key: String = "") -> void:
+	if key != "":
+		builder_key = key
+	tabs.set_tab_hidden(builder_tab, false)
+	if not visible:
+		popup()
+	if tabs.current_tab != builder_tab:
+		tabs.current_tab = builder_tab   # tab_changed refreshes it and opens builder_key
+	elif key != "":
+		main.mesh_builder.select_key(key)
+
+func _on_builder_shown() -> void:
+	main.mesh_builder.refresh()
+	if builder_key != "":
+		main.mesh_builder.select_key(builder_key)
 
 func _grid() -> ItemList:
 	var l := ItemList.new()
@@ -139,6 +185,9 @@ func _grid() -> ItemList:
 
 func _on_shown() -> void:
 	if visible:
+		if tabs.current_tab == builder_tab:
+			_on_builder_shown()
+			return
 		if main.geometry.prefabs.is_empty():
 			tabs.current_tab = 1
 		refresh()
@@ -151,7 +200,8 @@ func refresh() -> void:
 	_gen += 1
 	thumbs.clear()
 	var fills := [_fill_prefabs, _fill_level, _fill_assets]
-	fills.push_front(fills.pop_at(tabs.current_tab))
+	if tabs.current_tab < fills.size():
+		fills.push_front(fills.pop_at(tabs.current_tab))
 	for f in fills:
 		f.call()
 
@@ -440,16 +490,12 @@ func _new_mesh() -> void:
 	if main.project.is_empty():
 		return
 	main.mesh_builder.new_folder = folder
-	if not main.mesh_builder.visible:
-		main.toggle_mesh_builder()
+	show_builder()
 	main.mesh_builder.file_dialog.popup_centered_ratio(0.6)
 
 func _edit_mesh() -> void:
 	var m := _mine(_mine_pick())
-	if not main.mesh_builder.visible:
-		main.toggle_mesh_builder()
-	if m.size() and m[0] == "mesh":
-		main.mesh_builder.select_key(m[1])
+	show_builder(m[1] if m.size() and m[0] == "mesh" else "")
 
 func _fill_move_menu() -> void:
 	var pm := move_menu.get_popup()
@@ -542,4 +588,8 @@ func _on_level_selected() -> void:
 		var p: Variant = level_list.get_item_metadata(i)
 		if is_instance_valid(p):
 			out.append(p)
+			for mm in main.geometry.members_of(p.get_meta("tree")):
+				if str(mm.get("map", "")).begins_with("@project/imports/"):
+					offer_builder("imp_" + str(mm["map"]).get_file())
+					break
 	main.select(out)

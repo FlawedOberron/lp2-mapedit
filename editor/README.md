@@ -21,7 +21,8 @@ project.
   - spawns as capsules: red = team A, blue = team B, green = other
   - VS = orange boxes, weapons = yellow, other objects (posts...) = purple
   - every marker has a dot that stays visible from across the map
-  - **Quick place (Q):** with one spawn, pickup or VS selected, click where it goes and drag to aim it
+  - **Place (T)** also adds **Data posts** (for the Data Post game type; maps started empty have none until you do).
+  - **Quick place (Q):** with one spawn, pickup, VS or data post selected, click where it goes and drag to aim it
     (Ctrl or Snap: 15 degree steps); Esc cancels.
 - **Level geometry:** the stage is split into pieces (lp2pieces.py: connected parts, near ones joined).
   - Click to select (Shift / Ctrl+click adds); clicking never moves anything.
@@ -32,6 +33,9 @@ project.
   - Duplicate (Ctrl+D), Delete, Reset (back where the map had it), Group (Ctrl+G), Ungroup
     (Ctrl+Shift+G: a piece splits into its parts, then into single atoms), Restore deleted.
   - Ctrl+Z / Ctrl+Y undo / redo.
+  - **Static / dynamic** (right-click in the outliner, or the inspector's Dynamic box): static pieces cast shadows in
+    the baked lighting; dynamic ones get light but cast none. Placed imported meshes and library pieces are baked with
+    the map (editor and export); after moving one, bake again.
 - Selected pieces show a wireframe of their edges (bright, and faint through walls).
 - **Browser (B)**: a floating window with thumbnails. Prefabs: make one from the selected pieces, place
   copies (where the view points) or double-click; copies reuse the stage's own geometry and textures.
@@ -43,6 +47,15 @@ project.
   the start, Esc back to the editor. The speeds / heights are guesses to tune against the game (settings.cfg
   [preview]: run, walk, crouch_speed, jump, gravity, height, crouch_height, radius, grapple_range, grapple_speed,
   slope, step, fov).
+- Opening a floating window closes the others.
+- **Navmesh (N)**: Build navmesh makes the bots' navigation from the movement collision (placed and moved pieces
+  included), limited to the playable area: the walkable parts connected to the layout's markers (short jumps,
+  drops, and the grapple's 11 m reach count), above the kill floor, outside kill volumes and, if the map has any
+  **Map limits** volumes (Add volume; stack several, or add boxes to one, for odd shapes), inside one of them. Shown over the level, coloured by radar floor; tick
+  "Show what was left out" to see the dropped parts in red. **Radar floors**: no planes = the whole map is one floor;
+  each added plane (up to 8, so 9 floors, as stock ONLINE_08) starts a new floor above it, up to the next plane.
+  **Preview radar** draws the cockpit radar's floor images; the export packs them with zones that switch the radar
+  to the floor the player is on (needs a built navmesh, else the radar stays blank).
 - **Lighting (L)**, work in progress (doesn't fully match the game yet): sun (direction, colour x brightness), sky light from above / below and ambient (the game's
   hemisphere and ambient lights), a stock map's day as a preset, the sky dome (the map's own, a stock map's sky,
   or a panorama image copied into `assets/`) and atmosphere (scattering preset, haze, sky tint). Placed point and
@@ -51,16 +64,30 @@ project.
   (a quick click, no turn) for the same settings in a popup. Export: lp2light.py --env
   (Light / Filter schedulers) and lp2sky.py (sky model in the online00_car1 slot). The preview shows the sun,
   ambient, the sky and placed lights (in baked mode they add on top of the bake).
-- **Mesh builder (M)**, experimental (WIP): a floating window to import OBJ / glTF files (Y up, metres: Blender's
+- **Mesh builder (M)**, experimental (WIP): the Browser's Mesh builder tab (it appears once you pick a custom mesh in My
+  assets or In the level, and opens that mesh) to import OBJ / glTF files (Y up, metres: Blender's
   default export) as pieces (lp2mesh.py; kept in the project's `imports/`). Each file is one piece; double-click (or
   Place) puts a copy where the view points, and the Browser lists them under My assets (New custom mesh, folders).
   - Collision objects: a Blender object named `COL_<name>` (any `.001` suffix) is the collision of `<name>` and isn't
     drawn; objects without one collide with their own triangles.
   - Per mesh: collision (own mesh / COL_ objects, its box, or none), scale, and which project material each of the file's materials uses.
     Apply rebuilds it; Re-import reads the file again from where it came from. Placed copies follow either way.
+  - **Lazy unwrap**: box-projected UVs (UV unwrap: metres per texture tile, 1 by default) for meshes without a proper
+    unwrap, such as a whitebox, so grids and tiling textures sit right.
+  - **Blockout**: colours the mesh by facing instead of its own materials: walkable floors orange, walls grey-white,
+    ceilings dark grey (1 m grids; project materials `blockout_floor` / `_wall` / `_ceiling`, recolour them like any
+    other). Off puts the file's materials back. A material's **Grid texture** button makes that one material a grid.
   - Materials (the project's `materials/`): colour map, normal map (OpenGL style), specular mask (white = shiny), or a
     plain colour; largest side 256-2048 px. A file's own materials become project materials of the same name (an
     existing one is reused), so meshes that share a trim sheet load its textures once per map. Preview: a lit sphere.
+- **Barrier** (Place > Volume > Barrier, or tick Barrier on any volume): an invisible wall or roof. Players and VS
+  can't pass it; bullets fly through and the grapple can't hook onto it (it's only in the movement collision). Move,
+  turn and Ctrl+drag its faces like any volume; thin boxes work best.
+- **Layouts**: the game picks one of the map's 4 layouts per match. **Copy to other layouts** (next to Game types)
+  copies the shown set's spawns, pickups, VS and posts into the other three. The export warns about spawn points with
+  no playable navmesh under them (on a roof, outside the map).
+- **Data posts** are numbered (inspector: Post number, unique per layout). Post 1 is also every team's first base
+  respawn. **Team bases** (red / blue spheres) and free-for-all points (green) are placeable spawn kinds.
 - **Kill floor** (Map info): a height, shown as a red sheet and saved in the project. The game does not
   use it yet (it needs the DLL's map volumes).
 - **Pickup** (select weapon pickups): a fixed weapon (always that one, whatever the loadouts) or a slot (Standard /

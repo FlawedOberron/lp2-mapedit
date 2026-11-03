@@ -18,6 +18,7 @@ var uv: PackedVector2Array
 var col: PackedColorArray
 var idx: PackedInt32Array
 var bake_ch: Array = []   # lp2bake.py's light components: 4 PackedFloat32Array (CUSTOM0-3, RGBA per vertex), or empty
+var baked_copies := {}    # lp2bake.py write_copies: copy_key() -> {pos, nrm, uv, col, idx, ch, blocks}: placed pieces lit with the map
 var atom_blocks := {}   # atom -> [block, ...]; block = [atom, mat, v0, vn, i0, in]
 var atom_tris := PackedInt32Array()
 var atom_verts := PackedInt32Array()
@@ -133,9 +134,70 @@ func load_bake(prev: String) -> void:
 		return   # from an older preview
 	for i in 4:
 		bake_ch.append(b.slice(i * n, (i + 1) * n).to_float32_array())
+	_load_baked_copies(prev)
+
+static func copy_key(rel: String, atom: int, m: Array) -> String:
+	# a placed piece as the bake saw it: moved since, it shows unbaked until the next bake
+	var parts := PackedStringArray([rel, str(atom)])
+	for v in m:
+		parts.append("%.1f" % float(v))
+	return "|".join(parts)
+
+func _load_baked_copies(prev: String) -> void:
+	baked_copies = {}
+	var j: Variant = JSON.parse_string(FileAccess.get_file_as_string(prev.path_join("bake_copies.json")))
+	if not (j is Dictionary):
+		return
+	var bin := FileAccess.get_file_as_bytes(prev.path_join("bake_copies.bin"))
+	var a: Dictionary = j["arrays"]
+	if bin.size() < int(a["bake"][0]) + int(a["bake"][1]):
+		return
+	var all := {"pos": _slice(bin, a["pos"]).to_vector3_array(), "nrm": _slice(bin, a["nrm"]).to_vector3_array(),
+		"uv": _slice(bin, a["uv"]).to_vector2_array(), "col": _slice(bin, a["col"]).to_color_array(),
+		"idx": _slice(bin, a["idx"]).to_int32_array(), "ch": []}
+	var ch := _slice(bin, a["bake"])
+	var n: int = (all["pos"] as PackedVector3Array).size() * 16
+	for i in 4:
+		all["ch"].append(ch.slice(i * n, (i + 1) * n).to_float32_array())
+	var baked_at := FileAccess.get_modified_time(prev.path_join("bake_copies.json"))
+	for c in j["copies"]:
+		# a mesh rebuilt since the bake (new materials / atoms) shows unbaked until the next bake
+		var geo: String = library.map_path(str(c["map"])).path_join(".preview/geo.json") if library else ""
+		if geo != "" and FileAccess.get_modified_time(geo) > baked_at:
+			continue
+		baked_copies[copy_key(str(c["map"]), int(c["atom"]), c["m"])] = {"data": all, "blocks": c["blocks"]}
 
 func _slice(bin: PackedByteArray, r: Array) -> PackedByteArray:
 	return bin.slice(int(r[0]), int(r[0]) + int(r[1]))
+
+func _add_baked_copy(by_mat: Dictionary, bc: Dictionary, rel: String, L: Transform3D, nb: Transform3D, flip: bool) -> void:
+	# a placed piece from the bake (its own split vertices and light), in place of its source mesh
+	var d: Dictionary = bc["data"]
+	for b in bc["blocks"]:
+		var mat := "%s|%d" % [rel, int(b[0])]
+		if not by_mat.has(mat):
+			by_mat[mat] = [PackedVector3Array(), PackedVector3Array(), PackedVector2Array(), PackedColorArray(), PackedInt32Array(),
+				PackedFloat32Array(), PackedFloat32Array(), PackedFloat32Array(), PackedFloat32Array()]
+		var acc: Array = by_mat[mat]
+		var base: int = (acc[0] as PackedVector3Array).size()
+		var v0: int = b[1]
+		var vn: int = b[2]
+		acc[0].append_array(L * (d["pos"] as PackedVector3Array).slice(v0, v0 + vn))
+		acc[1].append_array(nb * (d["nrm"] as PackedVector3Array).slice(v0, v0 + vn))
+		acc[2].append_array((d["uv"] as PackedVector2Array).slice(v0, v0 + vn))
+		acc[3].append_array((d["col"] as PackedColorArray).slice(v0, v0 + vn))
+		for c in 4:
+			acc[5 + c].append_array((d["ch"][c] as PackedFloat32Array).slice(v0 * 4, (v0 + vn) * 4))
+		var ii: PackedInt32Array = (d["idx"] as PackedInt32Array).slice(b[3], b[3] + b[4])
+		for i in range(0, ii.size(), 3):
+			if not flip:   # wound to the normals (LP2's counter-clockwise) -> Godot's front faces
+				var s := ii[i]
+				ii[i] = ii[i + 1]
+				ii[i + 1] = s
+			ii[i] += base
+			ii[i + 1] += base
+			ii[i + 2] += base
+		acc[4].append_array(ii)
 
 func _load_node(node: Dictionary, xf: Dictionary, copies: Array, used: Dictionary) -> Dictionary:
 	if node.has("children"):
@@ -149,6 +211,8 @@ func _load_node(node: Dictionary, xf: Dictionary, copies: Array, used: Dictionar
 		var g: Dictionary = {"name": node["name"], "children": ch} if ch.size() > 1 else ch[0].merged({"name": node["name"]}, true)
 		if node.get("mesh_collision", false):
 			g["mesh_collision"] = true
+		if node.get("dynamic", false):
+			g["dynamic"] = true
 		if node.has("tag"):
 			g["tag"] = node["tag"]
 		return g
@@ -164,12 +228,15 @@ func _load_node(node: Dictionary, xf: Dictionary, copies: Array, used: Dictionar
 			var mm := {"atom": int(c["atom"]), "copy": true, "L": _from_cm(c["m"])}
 			if c.has("map"):
 				mm["map"] = c["map"]
+				mm["bake_key"] = copy_key(str(c["map"]), int(c["atom"]), c["m"])
 			members.append(mm)
 	if members.is_empty():
 		return {}
 	var out := {"name": node["name"], "members": members}
 	if node.get("mesh_collision", false):
 		out["mesh_collision"] = true
+	if node.get("dynamic", false):
+		out["dynamic"] = true   # lp2pieces.dynamic_parts: lit by the bake, casts no shadows
 	if node.has("tag"):
 		out["tag"] = node["tag"]   # script name (main.gd object_tag)
 	return out
@@ -215,10 +282,19 @@ func _make_materials(prev: String) -> void:
 		materials_baked.append(sm)
 
 func set_bake_params(p: Dictionary) -> void:
-	# the live bake settings (lighting.gd) on this map's baked materials
+	# the live bake settings (lighting.gd) on this map's baked materials, and on the placed pieces' maps' (baked with it)
 	for m in materials_baked:
 		for k in p:
 			m.set_shader_parameter(k, p[k])
+	if library == null:
+		return
+	var maps := {}
+	for key in baked_copies:
+		maps[str(key).get_slice("|", 0)] = true
+	for rel in maps:
+		var g: Node = library.map_geometry_rel(rel)
+		if g != null and g != self:
+			g.set_bake_params(p)
 
 func set_baked(on: bool) -> void:
 	baked = on
@@ -289,6 +365,10 @@ func build_mesh(t: Dictionary) -> ArrayMesh:
 		var L: Transform3D = m["L"]
 		var nb := Transform3D(L.basis.inverse().transposed(), Vector3.ZERO)
 		var flip := L.basis.determinant() < 0
+		var bc: Dictionary = baked_copies.get(m.get("bake_key", ""), {})
+		if not bc.is_empty() and not bake_ch.is_empty():
+			_add_baked_copy(by_mat, bc, m["map"], L, nb, flip)
+			continue
 		for b in g.atom_blocks.get(m["atom"], []):
 			var mat: Variant = b[1] if g == self else "%s|%d" % [m["map"], b[1]]
 			if not by_mat.has(mat):
@@ -536,6 +616,8 @@ func ungroup(p: Node3D) -> Array:
 		for c in t["children"]:
 			if t.get("mesh_collision", false):
 				c["mesh_collision"] = true   # the group's setting stays with its parts
+			if t.get("dynamic", false):
+				c["dynamic"] = true
 			out.append(add_piece(c, Transform3D.IDENTITY, true))
 	else:
 		var i := 0
@@ -544,6 +626,8 @@ func ungroup(p: Node3D) -> Array:
 			var part := {"name": "%s.%d" % [t["name"], i], "members": [m]}
 			if t.get("mesh_collision", false):
 				part["mesh_collision"] = true
+			if t.get("dynamic", false):
+				part["dynamic"] = true
 			out.append(add_piece(part, Transform3D.IDENTITY, true))
 	return out
 
@@ -630,6 +714,9 @@ func refresh_import(rel: String) -> void:
 	if ts.is_empty():
 		return
 	var fresh: Array = members_of(ts[0])
+	for k in baked_copies.keys():   # their bake was of the old mesh
+		if (k as String).begins_with(rel + "|"):
+			baked_copies.erase(k)
 	for p in placed_from(rel):
 		_swap_members(p.get_meta("tree"), rel, fresh)
 		rebuild(p)
@@ -663,6 +750,8 @@ func _tree_out(t: Dictionary, g: Transform3D, xf: Dictionary, copies: Array) -> 
 		var o := {"name": t["name"], "children": t["children"].map(func(c): return _tree_out(c, g, xf, copies))}
 		if t.get("mesh_collision", false):
 			o["mesh_collision"] = true
+		if t.get("dynamic", false):
+			o["dynamic"] = true
 		if t.has("tag"):
 			o["tag"] = t["tag"]
 		return o
@@ -685,6 +774,8 @@ func _tree_out(t: Dictionary, g: Transform3D, xf: Dictionary, copies: Array) -> 
 		out["copies"] = cps
 	if t.get("mesh_collision", false):
 		out["mesh_collision"] = true   # lp2pieces.mesh_collision: collision from the visible triangles
+	if t.get("dynamic", false):
+		out["dynamic"] = true   # lp2pieces.dynamic_parts: lit by the bake, casts no shadows
 	if t.has("tag"):
 		out["tag"] = t["tag"]
 	return out

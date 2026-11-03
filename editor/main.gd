@@ -16,7 +16,11 @@ const DEFAULT_TOOLS := "~/Projects/lp2-tools"
 const CM := 0.01
 const ROLE_COLOURS := {
 	"team_a": Color(0.9, 0.15, 0.12), "team_b": Color(0.15, 0.35, 0.95),
+	"k30": Color(0.95, 0.2, 0.15), "k31": Color(0.2, 0.4, 1.0), "k40": Color(0.25, 0.9, 0.35),
 }
+# points the game never shows (rInitPosSet kinds 6 / 7: one team base each, VS mode; kind 3: free-for-all and
+# Fugitive): big spheres, so they stand out from the spawn capsules
+const BASE_ROLES := {"k30": "Team A base", "k31": "Team B base", "k40": "FFA / Fugitive point"}
 const SPAWN_COLOUR := Color(0.2, 0.85, 0.3)
 const OBJECT_STYLE := {  # role -> [colour, size (m)]
 	"vs": [Color(1.0, 0.55, 0.1), Vector3(3.0, 3.0, 3.0)],
@@ -55,6 +59,7 @@ const VS_TIERS := [[-1, "Stock (base map's, by index)"], [0, "Few, Many and All"
 const DIG_PILES := ["Pile A (om8100: Pirate Fortress, Frozen Wasteland)", "Pile B (om8103: Desecration, Jungle)",
 	"Pile C (om8104: Desecration, Jungle)"]
 # LP2 game types (lp2layout.py MODES: the game's layout file names); sets and markers list them in "modes"
+const OBJECT_ROLES := ["weapon", "vs", "object"]   # layout markers kept in a set's "objects" (the rest: "points")
 const GAME_TYPES := [["team", "Team Elimination"], ["slayer", "Elimination"], ["datapost", "Data Post"],
 	["fox", "Fugitive"], ["egg", "Akrid Egg"], ["counter", "Counter (name unknown)"], ["vs", "VS (name unknown)"]]
 # top bar view icons (white line art, drawn from SVG at run time: no imported files)
@@ -129,6 +134,8 @@ var browser: Window
 var mesh_builder: Window
 var lighting: Window
 var fog_win: Window
+var nav_win: Window     # navmesh.gd
+var nav_test := false   # --navmesh: the window open and the navmesh shown in the screenshot
 var scripts_win: Window   # scripts.gd: visual scripting (K)
 var settings_win: Window
 var new_win: Window
@@ -153,6 +160,8 @@ var insp_scale: Array = []
 var insp_rows: Array = []   # rows hidden for markers (tilt, scale)
 var piece_buttons: Array = []
 var mesh_col: CheckBox   # selected pieces: collision made from their visible mesh
+var dyn_box: CheckBox      # the selected pieces are dynamic: lit by the bake, no baked shadows
+var piece_menu: PopupMenu  # the outliner's right-click menu
 var info_name: LineEdit
 var info_size: OptionButton
 var water_on: CheckBox
@@ -179,8 +188,11 @@ var dig_row: Control   # buried pickups / VS ("dig here" pile)
 var dig_on: CheckBox
 var dig_count: SpinBox
 var dig_pile: OptionButton
+var post_row: Control   # a data post's number (lp2layout: +0x78 / +0x7c of its record)
+var post_num: SpinBox
 var baked_toggle: CheckButton
 var wire_toggle: CheckButton
+var nav_toggle: CheckButton   # the navmesh overlay (navmesh.gd show_box, kept in step)
 var drag_sizes: Array = []   # volumes' sizes when a gizmo drag began
 var view_toggles := {}   # top bar icons: "volumes", "lights", "fog", "post" (remembered in settings)
 var wire_on_start := false   # --wireframe (tests)
@@ -311,6 +323,8 @@ func _ready() -> void:
 			call_deferred("toggle_lighting")
 		elif args[i] == "--fog":
 			call_deferred("toggle_fog")
+		elif args[i] == "--navmesh":
+			nav_test = true
 		elif args[i] == "--browser-tab" and i + 1 < args.size():
 			browser_tab = int(args[i + 1])
 		elif args[i] == "--browser-group" and i + 1 < args.size():
@@ -405,7 +419,7 @@ func _build_ui() -> void:
 	root.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	ui.add_child(root)
 
-	# two rows: the project, the windows and the job status; then the layout, the edit tools and the preview
+	# three rows: the project, the windows and the job status; the layout and the edit tools; what the view shows
 	var bars := VBoxContainer.new()
 	root.add_child(_panel(bars))
 	var bar := _scroll_row(bars)
@@ -420,6 +434,7 @@ func _build_ui() -> void:
 	_button(bar, "Lighting (L)", toggle_lighting).tooltip_text = "The sun, sky light, sky dome and placed point / spot lights"
 	_button(bar, "Map info (I)", toggle_info).tooltip_text = "Name, size, water and kill floor heights, physics rebuild"
 	_button(bar, "Fog & weather (H)", toggle_fog).tooltip_text = "Distance fog, low-lying height fog, rain / snow / ash and no-weather boxes"
+	_button(bar, "Navmesh (N)", func(): nav_win.toggle()).tooltip_text = "Build the bots' navigation mesh (playable area only) and set the radar floors"
 	_button(bar, "Scripts (K)", toggle_scripts).tooltip_text = "Visual scripting: events (volumes entered, timers) switch volumes' effects during the match (experimental, xlive mod)"
 	_button(bar, "Place (T)", toggle_placer).tooltip_text = "Place spawn points, weapons, VS and volumes: click the map to put one down, drag to aim it (volumes: drag out the floor)"
 	_button(bar, "Settings", toggle_settings).tooltip_text = "The game folders and the asset library folder"
@@ -458,6 +473,7 @@ func _build_ui() -> void:
 	set_types.get_popup().hide_on_checkable_item_selection = false
 	set_types.get_popup().index_pressed.connect(_on_set_type)
 	bar.add_child(set_types)
+	_button(bar, "Copy to other layouts", copy_set_to_layouts).tooltip_text = "Replace the matching marker set in the other 3 layouts with copies of this one (spawns, pickups, VS, posts). Ctrl+Z undoes it"
 	bar.add_child(VSeparator.new())
 	for m in [["Move (W)", 0], ["Rotate (E)", 1], ["Scale (R)", 2]]:
 		var b := Button.new()
@@ -470,7 +486,8 @@ func _build_ui() -> void:
 	snap_toggle.text = "Snap"
 	snap_toggle.tooltip_text = "Snap moves to 50 cm, turns to 15 degrees, scale to 0.1 (or hold Ctrl while dragging)"
 	bar.add_child(snap_toggle)
-	bar.add_child(VSeparator.new())
+	bar = _scroll_row(bars)
+	bar.add_child(_label("View"))
 	baked_toggle = CheckButton.new()
 	baked_toggle.text = "Baked light"
 	baked_toggle.button_pressed = baked
@@ -486,6 +503,11 @@ func _build_ui() -> void:
 	wire_toggle.tooltip_text = "Draw the view as wireframe, with the triangles in view counted (density, detail baking)"
 	wire_toggle.toggled.connect(_on_wireframe)
 	bar.add_child(wire_toggle)
+	nav_toggle = CheckButton.new()
+	nav_toggle.text = "Navmesh"
+	nav_toggle.tooltip_text = "Show the bots' navmesh over the level, coloured by radar floor (build it in the Navmesh window, N)"
+	nav_toggle.button_pressed = cfg.get_value("view", "navmesh", false)
+	bar.add_child(nav_toggle)
 	bar.add_child(VSeparator.new())
 	for t in [["volumes", ICON_VOLUMES, "Show volumes (kill, gravity, post-process, no-weather boxes)", true],
 			["lights", ICON_LIGHTS, "Show light nodes", true],
@@ -531,6 +553,15 @@ func _build_ui() -> void:
 	outliner.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	outliner.multi_selected.connect(_on_tree_selected)
 	outliner.item_activated.connect(func(): frame_selected())
+	outliner.allow_rmb_select = true
+	outliner.item_mouse_selected.connect(_on_outliner_click)
+	piece_menu = PopupMenu.new()
+	piece_menu.add_item("Mark as static", 0)
+	piece_menu.add_item("Mark as dynamic", 1)
+	piece_menu.set_item_tooltip(0, "Baked lighting: casts shadows and gets light")
+	piece_menu.set_item_tooltip(1, "Baked lighting: gets light but casts no shadows (for pieces that will move or shouldn't shade the level)")
+	piece_menu.id_pressed.connect(func(i): _set_dynamic(i == 1))
+	add_child(piece_menu)
 	outl.add_child(outliner)
 	var orow := HBoxContainer.new()
 	_button(orow, "Group", group_selected).tooltip_text = "Ctrl+G: join the selected pieces into one"
@@ -587,6 +618,11 @@ func _build_ui() -> void:
 	mesh_col.tooltip_text = "Replace the selected pieces' collision (walking and shots) with their visible triangles, wherever they are. For pieces whose imported collision is missing or doesn't match"
 	mesh_col.toggled.connect(_on_mesh_col)
 	right.add_child(mesh_col)
+	dyn_box = CheckBox.new()
+	dyn_box.text = "Dynamic (no baked shadows)"
+	dyn_box.tooltip_text = "Static pieces cast shadows in the baked lighting; dynamic ones get light but cast none. Also on the outliner's right-click menu. Bake again to see it"
+	dyn_box.toggled.connect(func(on): if not updating_ui: _set_dynamic(on))
+	right.add_child(dyn_box)
 	var prow := HBoxContainer.new()
 	prow.add_child(_label("Pickup"))
 	pickup_pick = OptionButton.new()
@@ -633,6 +669,14 @@ func _build_ui() -> void:
 	dbox.add_child(dig_pile)
 	dig_row = dbox
 	right.add_child(dbox)
+	var post_box := HBoxContainer.new()
+	post_box.add_child(_label("Post number"))
+	post_num = _spin(1, 64, 1)
+	post_num.tooltip_text = "The number the game shows for this data post; each post in a layout has its own (picking one another post has swaps them)"
+	post_num.value_changed.connect(_on_post_num)
+	post_box.add_child(post_num)
+	post_row = post_box
+	right.add_child(post_box)
 	var tbox := VBoxContainer.new()
 	tbox.add_child(_label("On game types"))
 	var tg := GridContainer.new()
@@ -822,6 +866,7 @@ void fragment() {
 	mesh_builder.set_script(load("res://meshbuilder.gd"))
 	add_child(mesh_builder)
 	mesh_builder.setup(self, thumbs)
+	browser.add_builder(mesh_builder)   # its page is the Browser's "Mesh builder" tab
 	lighting = Window.new()
 	lighting.set_script(load("res://lighting.gd"))
 	add_child(lighting)
@@ -853,6 +898,16 @@ void fragment() {
 	fog_win.set_script(load("res://fog.gd"))
 	add_child(fog_win)
 	fog_win.setup(self)
+	nav_win = Window.new()
+	nav_win.set_script(load("res://navmesh.gd"))
+	add_child(nav_win)
+	nav_win.setup(self)
+	nav_win.show_box.button_pressed = nav_toggle.button_pressed
+	nav_toggle.toggled.connect(func(on): nav_win.show_box.button_pressed = on)
+	nav_win.show_box.toggled.connect(func(on):
+		nav_toggle.set_pressed_no_signal(on)
+		cfg.set_value("view", "navmesh", on)
+		cfg.save(SETTINGS))
 	scripts_win = Window.new()
 	scripts_win.set_script(load("res://scripts.gd"))
 	add_child(scripts_win)
@@ -864,8 +919,16 @@ void fragment() {
 	# Place is its own OS window: while it's open, the view takes the focus back as soon as the mouse is over it, so
 	# the first click there places instead of only focusing the editor
 	get_window().mouse_entered.connect(func(): if placer.visible and not get_window().has_focus(): get_window().grab_focus())
-	for w: Window in [info_win, browser, mesh_builder, lighting, settings_win, new_win, fog_win, placer, scripts_win]:
+	var tool_windows: Array[Window] = [info_win, browser, lighting, settings_win, new_win, fog_win, nav_win,
+		placer, scripts_win]
+	for w: Window in tool_windows:
 		w.window_input.connect(_on_tool_window_input.bind(w))   # Ctrl+S saves from any of them too
+		# one floating window at a time: opening one closes the others
+		w.visibility_changed.connect(func():
+			if w.visible:
+				for o: Window in tool_windows:
+					if o != w and o.visible:
+						o.hide())
 	lighting_dialog = FileDialog.new()
 	lighting_dialog.file_mode = FileDialog.FILE_MODE_OPEN_FILE
 	lighting_dialog.access = FileDialog.ACCESS_FILESYSTEM
@@ -1399,6 +1462,31 @@ func open_project(dir: String) -> void:
 	terrain.load_all()
 	var lay: Variant = _read_json(dir.path_join(project["layout"]["file"]))
 	layout = _ints(lay) if lay is Dictionary else {"sets": []}
+	for st in layout["sets"]:   # data posts placed before 2026-11-03 went in with the spawn points
+		var moved: Array = st.get("points", []).filter(func(q): return q.get("role", "") in OBJECT_ROLES)
+		for q in moved:
+			st["points"].erase(q)
+			st.get_or_add("objects", []).append(q)
+		var posts: Array = []   # overlapping posts (double placements): keep the first
+		var dropped := false
+		for q in st.get("objects", []).duplicate():
+			if q.get("role", "") != "object":
+				continue
+			var at := Vector3(q["pos"][0], q["pos"][1], q["pos"][2])
+			if posts.any(func(o): return o.distance_to(at) < 150.0):
+				st["objects"].erase(q)
+				log_line("Removed a data post overlapping another (layout set %s); save to keep this" % str(st.get("ids", [])))
+				dropped = true
+			else:
+				posts.append(at)
+		if dropped:   # the numbers left: 1, 2, 3... again, in their order
+			var left: Array = st["objects"].filter(func(o): return o.get("role", "") == "object" and o.has("post"))
+			left.sort_custom(func(a, b): return int(a["post"]) < int(b["post"]))
+			for i in left.size():
+				left[i]["post"] = i
+		for q in st.get("objects", []):   # posts without a number (before 2026-11-03): the lowest free one
+			if q.get("role", "") == "object" and not q.has("post"):
+				q["post"] = next_post_number(st)
 	if screenshot_path == "":   # test runs (--screenshot) don't become the project the editor reopens
 		cfg.set_value("recent", "project", dir)
 		cfg.save(SETTINGS)
@@ -1426,6 +1514,7 @@ func open_project(dir: String) -> void:
 	lighting.presets = {}
 	lighting.apply_preview()
 	fog_win.refresh()
+	nav_win.refresh()
 	scripts_win.refresh()
 	DisplayServer.window_set_title("LP2 Map Editor - %s" % project["info"].get("name", dir))
 	log_line("Opened %s (%d marker sets)" % [dir, layout["sets"].size()])
@@ -1439,7 +1528,7 @@ func open_project(dir: String) -> void:
 	saved_state = _saved_state()
 	opening = true
 	build_preview(false)
-	if mesh_builder.visible:
+	if mesh_builder.is_open():
 		mesh_builder.refresh()
 	if lighting.visible:
 		lighting.refresh()
@@ -1556,10 +1645,10 @@ func capture_thumbnail() -> void:
 	sv.add_child(cam)
 	add_child(sv)
 	cam.make_current()
-	# as the game shows it: no markers, volumes, gizmo, kill sheet, collision view or selection
+	# as the game shows it: no markers, volumes, gizmo, kill sheet, collision view, navmesh or selection
 	var keep_sel := selection.duplicate()
 	select([])
-	var hide: Array = [markers_root, gizmo, preview, kill_plane, col_mesh] + world.find_children("wall_*", "", true, false)
+	var hide: Array = [markers_root, gizmo, preview, kill_plane, col_mesh, nav_win.overlay, nav_win.plane_root] + world.find_children("wall_*", "", true, false)
 	var shown: Array = hide.filter(func(n): return n != null and is_instance_valid(n) and n.visible)
 	for n in shown:
 		n.visible = false
@@ -2248,6 +2337,13 @@ func _screenshot() -> void:
 		get_viewport().get_texture().get_image().save_png(screenshot_path.get_basename() + "-fogview.png")
 	if fog_win.visible:
 		fog_win.get_texture().get_image().save_png(screenshot_path.get_basename() + "-fog.png")
+	if nav_test:
+		nav_win.toggle()
+		nav_win.show_box.button_pressed = true
+		await get_tree().create_timer(0.5).timeout
+		await RenderingServer.frame_post_draw
+		get_viewport().get_texture().get_image().save_png(screenshot_path.get_basename() + "-navview.png")
+		nav_win.get_texture().get_image().save_png(screenshot_path.get_basename() + "-navmesh.png")
 	if lighting.visible:
 		lighting.get_texture().get_image().save_png(screenshot_path.get_basename() + "-lighting.png")
 		if not selection.is_empty():
@@ -2255,6 +2351,24 @@ func _screenshot() -> void:
 			await get_tree().create_timer(1.0).timeout
 			await RenderingServer.frame_post_draw
 			lighting.light_popup.get_texture().get_image().save_png(screenshot_path.get_basename() + "-lightmenu.png")
+	if not lighting.visible and selection.size() == 1 and selection[0].has_meta("tree"):
+		# a piece's right-click menu in the viewport (Mark as static / dynamic)
+		var pc: Node3D = selection[0]
+		var sp := Vector2.ZERO
+		var vs := get_viewport().get_visible_rect().size
+		for k in 400:   # a point of the view on the piece itself (not a marker on it)
+			var q := Vector2(vs.x * (0.3 + 0.4 * float(k % 20) / 19.0), vs.y * (0.3 + 0.4 * float(k / 20) / 19.0))
+			if _pick(q) == pc:
+				sp = q
+				break
+		select([])
+		_on_right_click(sp)
+		await get_tree().create_timer(0.5).timeout
+		await RenderingServer.frame_post_draw
+		print("piece-menu: shown ", piece_menu.visible, " at ", piece_menu.position, " (click ", sp, ", window ", get_window().position,
+			"), picked ", _pick(sp), ", selected the piece ", selection.has(pc))
+		get_viewport().get_texture().get_image().save_png(screenshot_path.get_basename() + "-piecemenu.png")
+		piece_menu.hide()
 	if browser.visible:
 		if browser_tab >= 0:
 			browser.tabs.current_tab = browser_tab
@@ -2262,7 +2376,7 @@ func _screenshot() -> void:
 			browser.show_group(browser_group)
 		await get_tree().create_timer(15.0).timeout
 		browser.get_texture().get_image().save_png(screenshot_path.get_basename() + "-browser.png")
-	if mesh_builder.visible:
+	if mesh_builder.is_open():
 		if mesh_builder.import_list.item_count:
 			mesh_builder.import_list.select(0)
 			mesh_builder._show_import()
@@ -2270,7 +2384,7 @@ func _screenshot() -> void:
 			mesh_builder.mat_list.select(mesh_builder.mat_list.item_count - 1)
 			mesh_builder._show_material()
 		await get_tree().create_timer(3.0).timeout
-		mesh_builder.get_texture().get_image().save_png(screenshot_path.get_basename() + "-meshbuilder.png")
+		browser.get_texture().get_image().save_png(screenshot_path.get_basename() + "-meshbuilder.png")
 	if OS.get_cmdline_user_args().has("--save"):
 		save_project()
 	var sa := OS.get_cmdline_user_args().find("--save-as")
@@ -2322,8 +2436,49 @@ func show_set(i: int) -> void:
 	_rebuild_outliner()
 	_update_stats()
 
+func copy_set_to_layouts() -> void:
+	if set_index < 0:
+		return
+	var twins: Array = placer._twin_sets(set_index)
+	if twins.is_empty():
+		set_status("No matching set in the other layouts")
+		return
+	_push_undo("")
+	var src: Dictionary = layout["sets"][set_index]
+	for j in twins:
+		layout["sets"][j]["points"] = src.get("points", []).duplicate(true)
+		layout["sets"][j]["objects"] = src.get("objects", []).duplicate(true)
+	_update_stats()
+	log_line("Copied this set's %d spawns and %d objects to %d other layout(s)." % [src.get("points", []).size(), src.get("objects", []).size(), twins.size()])
+
+func next_post_number(st: Dictionary) -> int:
+	# the lowest data post number (0-based) no post in the set has
+	var used: Array = st.get("objects", []).filter(func(q): return q.get("role", "") == "object" and q.has("post")).map(func(q): return int(q["post"]))
+	var n := 0
+	while n in used:
+		n += 1
+	return n
+
+func _on_post_num(v: float) -> void:
+	if updating_ui or set_index < 0:
+		return
+	var posts := selection.filter(func(n): return _is_marker(n) and (n.get_meta("data") as Dictionary).get("role", "") == "object")
+	if posts.size() != 1:
+		return
+	_push_undo("post")
+	var d: Dictionary = posts[0].get_meta("data")
+	var want := int(v) - 1
+	for q in layout["sets"][set_index].get("objects", []):   # the post that had it takes this one's old number
+		if not is_same(q, d) and q.get("role", "") == "object" and int(q.get("post", -1)) == want:
+			q["post"] = int(d.get("post", 0))
+	d["post"] = want
+	show_set(set_index)
+	select(posts)
+
 func _marker_label(d: Dictionary, is_object: bool) -> String:
 	var role: String = d.get("role", "?")
+	if role == "object" and str(d.get("model", "")).begins_with("om71"):
+		return "Data post %d" % (int(d.get("post", 0)) + 1)
 	if is_object:
 		var what: String = (" " + str(d["model"])) if d.has("model") else ""
 		if d.has("item"):
@@ -2338,6 +2493,8 @@ func _marker_label(d: Dictionary, is_object: bool) -> String:
 		return "spawn k40 (+ stock weapon pickup)"
 	if role == "start" and not layout.get("explicit", false):
 		return "spawn start (may get a stock pickup)"
+	if BASE_ROLES.has(role):
+		return BASE_ROLES[role]
 	return "spawn " + role
 
 func _category(n: Node3D) -> int:
@@ -2375,6 +2532,19 @@ func _add_marker(d: Dictionary, is_object: bool) -> void:
 		bs.size = style[1]
 		shape.shape = bs
 		shape.position.y = style[1].y / 2
+	elif BASE_ROLES.has(role):
+		var sph := SphereMesh.new()
+		sph.radius = 0.7
+		sph.height = 1.4
+		mi.mesh = sph
+		mi.position.y = 0.7
+		mat.albedo_color = ROLE_COLOURS[role]
+		mat.emission_enabled = true   # bright, even in shadow
+		mat.emission = ROLE_COLOURS[role] * 0.5
+		var ss := SphereShape3D.new()
+		ss.radius = 0.7
+		shape.shape = ss
+		shape.position.y = 0.7
 	else:
 		var cap := CapsuleMesh.new()
 		cap.radius = 0.4
@@ -2655,6 +2825,8 @@ func _show_inspector() -> void:
 	var geo_pieces := pieces.filter(func(n): return n.has_meta("tree"))
 	mesh_col.visible = not geo_pieces.is_empty()
 	mesh_col.button_pressed = geo_pieces.any(func(n): return n.get_meta("tree").get("mesh_collision", false))
+	dyn_box.visible = not geo_pieces.is_empty()
+	dyn_box.button_pressed = geo_pieces.any(func(n): return n.get_meta("tree").get("dynamic", false))
 	insp_name.visible = one != null and not _is_marker(one)
 	insp_tag.visible = one != null and not one.has_meta("volume")   # volumes: their Script marker name
 	if insp_tag.visible:
@@ -2674,6 +2846,10 @@ func _show_inspector() -> void:
 	if not vss.is_empty():
 		var t := int(vss[0].get_meta("data").get("tier", -1))
 		tier_pick.selected = maxi(0, VS_TIERS.find_custom(func(e): return e[0] == t))
+	var posts := selection.filter(func(n): return _is_marker(n) and n.has_meta("data") and (n.get_meta("data") as Dictionary).get("role", "") == "object")
+	post_row.visible = posts.size() == 1
+	if posts.size() == 1:
+		post_num.value = int(posts[0].get_meta("data").get("post", 0)) + 1
 	var diggable := _diggable()
 	dig_row.visible = not diggable.is_empty()
 	if not diggable.is_empty():
@@ -3053,10 +3229,16 @@ func drop_selected() -> void:
 	_show_inspector()
 
 func _on_right_click(at: Vector2) -> void:
+	if nav_win and nav_win.visible:   # no piece menus while the Navmesh window is open
+		return
 	# a quick right click on a light: its settings in a popup
 	var n := _pick(at)
 	if n and n.has_meta("light"):
 		lighting.light_menu(n, at)
+	elif n and n.has_meta("tree"):   # a piece: Mark as static / dynamic (the outliner's menu), for it or the selection it's in
+		if not selection.has(n):
+			select([n])
+		_popup_piece_menu(at)
 
 func _pick(mp: Vector2) -> Node3D:
 	# the marker nearest the camera whose position or dot is within 14 px of the mouse, else what the ray hits
@@ -3126,6 +3308,39 @@ func _on_mesh_col(on: bool) -> void:
 	log_line("%d piece(s): collision %s" % [n, "from their mesh" if on else "as imported"])
 	if col_toggle.button_pressed:
 		_on_collision(true)
+
+func _on_outliner_click(at: Vector2, button: int) -> void:
+	if button != MOUSE_BUTTON_RIGHT or _pieces_selected().filter(func(q): return q.has_meta("tree")).is_empty():
+		return
+	_popup_piece_menu(outliner.get_global_position() + at)
+
+func _popup_piece_menu(at: Vector2) -> void:
+	# at: in the window (popups are placed like the light menu's, lighting.gd light_menu)
+	piece_menu.reset_size()
+	var win := Vector2(get_viewport().get_visible_rect().size)
+	var sz := Vector2(piece_menu.size)
+	piece_menu.popup(Rect2i(popup_origin() + Vector2i(at.clamp(Vector2.ZERO, (win - sz).max(Vector2.ZERO))), Vector2i(sz)))
+
+func popup_origin() -> Vector2i:
+	# where the window's (0, 0) is for a popup: subwindows aren't embedded (project.godot), so they take screen positions
+	return Vector2i.ZERO if get_viewport().gui_embed_subwindows else get_window().position
+
+func _set_dynamic(on: bool) -> void:
+	# lp2bake.py: dynamic pieces get the baked light but cast no shadows (lp2pieces.dynamic_parts)
+	_push_undo("")
+	var n := 0
+	for p in _pieces_selected().filter(func(q): return q.has_meta("tree")):
+		_clear_dynamic(p.get_meta("tree"))
+		if on:
+			p.get_meta("tree")["dynamic"] = true
+		n += 1
+	log_line("%d piece(s) %s: bake the lighting again to see it" % [n, "dynamic (no baked shadows)" if on else "static"])
+	_show_inspector()
+
+func _clear_dynamic(t: Dictionary) -> void:
+	t.erase("dynamic")
+	for c in t.get("children", []):
+		_clear_dynamic(c)
 
 func _clear_mesh_col(t: Dictionary) -> void:
 	t.erase("mesh_collision")
@@ -3251,10 +3466,11 @@ func get_assets() -> void:
 		browser.refresh_assets())
 
 func toggle_mesh_builder() -> void:
-	if mesh_builder.visible:
-		mesh_builder.hide()
+	# the Browser's Mesh builder tab (M)
+	if mesh_builder.is_open():
+		browser.hide()
 	else:
-		mesh_builder.popup()
+		mesh_builder.open()
 
 func toggle_preview() -> void:
 	# walk the map from the spawn point nearest where the view points (else from that point, or below the
@@ -3443,6 +3659,7 @@ func _restore(s: Array) -> void:
 	if lighting.visible:
 		lighting.refresh()
 	fog_win.refresh()
+	nav_win.refresh()
 	_after_structure([])
 
 func undo() -> void:
@@ -3539,6 +3756,9 @@ func _unhandled_input(e: InputEvent) -> void:
 			scripts_win.stop_pick()
 			get_viewport().set_input_as_handled()
 			return
+	if nav_win and nav_win.visible and nav_win.handle_input(e):   # the Navmesh window: clicks drag its floor planes only
+		get_viewport().set_input_as_handled()
+		return
 	if terrain.editing() and terrain.handle_input(e):   # terrain edit mode: its brushes and keys; the level is locked
 		get_viewport().set_input_as_handled()
 		return
@@ -3684,9 +3904,11 @@ func _unhandled_input(e: InputEvent) -> void:
 				if ms.size() == 1:
 					placer.quick(ms[0])
 				else:
-					set_status("Quick place (Q): select one spawn point, pickup or VS first")
+					set_status("Quick place (Q): select one spawn point, pickup, VS or data post first")
 			KEY_H:
 				toggle_fog()
+			KEY_N:
+				nav_win.toggle()
 			KEY_K:
 				toggle_scripts()
 			KEY_I:
