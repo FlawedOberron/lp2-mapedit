@@ -273,7 +273,7 @@ func _begin(mp: Vector2) -> void:
 	# facing away from the camera until dragged
 	var fwd: Vector3 = -main.camera.global_transform.basis.z
 	d["pos"] = [_origin.x / main.CM, _origin.y / main.CM + 5.0, _origin.z / main.CM]
-	d["yaw"] = snappedf(rad_to_deg(atan2(-fwd.x, -fwd.z)), 0.01)
+	d["yaw"] = snappedf(rad_to_deg(atan2(fwd.x, fwd.z)), 0.01)   # the game faces +Z
 	var s: Dictionary = main.layout["sets"][main.set_index]
 	if d["role"] == "object":
 		d["post"] = main.next_post_number(s)
@@ -318,7 +318,7 @@ func _aim(mp: Vector2) -> void:
 		return
 	if dir.length() < 0.05:
 		return
-	var yaw := rad_to_deg(atan2(-dir.x, -dir.z))
+	var yaw := rad_to_deg(atan2(dir.x, dir.z))   # +Z (the game's front) towards the mouse
 	if main.snap_toggle.button_pressed or Input.is_key_pressed(KEY_CTRL):
 		yaw = snappedf(yaw, SNAP_DEG)
 	_node.rotation_degrees.y = yaw

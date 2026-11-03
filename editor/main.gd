@@ -2559,15 +2559,15 @@ func _add_marker(d: Dictionary, is_object: bool) -> void:
 		shape.position.y = 0.9
 	mi.material_override = mat
 	n.add_child(mi)
-	# facing: a small cone pointing along the marker's yaw
+	# facing: a small cone pointing along the marker's yaw (the game's front is +Z)
 	var arrow := MeshInstance3D.new()
 	var cone := CylinderMesh.new()
 	cone.top_radius = 0.0
 	cone.bottom_radius = 0.25
 	cone.height = 0.7
 	arrow.mesh = cone
-	arrow.rotation_degrees.x = -90
-	arrow.position = Vector3(0, 1.0, -0.8)
+	arrow.rotation_degrees.x = 90
+	arrow.position = Vector3(0, 1.0, 0.8)
 	var amat := StandardMaterial3D.new()
 	amat.albedo_color = Color.WHITE
 	arrow.material_override = amat
@@ -3497,7 +3497,7 @@ func toggle_preview() -> void:
 	if spawn != null:
 		var p: Array = spawn["pos"]
 		at = Vector3(p[0], p[1], p[2]) * CM
-		facing = deg_to_rad(float(spawn.get("yaw", 0.0)))
+		facing = deg_to_rad(float(spawn.get("yaw", 0.0))) + PI   # the camera looks along -Z, the game faces +Z
 	select([])
 	camera.process_mode = Node.PROCESS_MODE_DISABLED
 	ui_root.visible = false
