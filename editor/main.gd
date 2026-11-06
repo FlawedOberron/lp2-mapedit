@@ -1011,6 +1011,86 @@ func _send_mouse(at: Vector2, pressed: Variant, ctrl := false, shift := false) -
 	Input.parse_input_event(ev)
 	await get_tree().process_frame
 
+func _press_key(k: int, ctrl := false) -> void:
+	var ev := InputEventKey.new()
+	ev.keycode = k
+	ev.pressed = true
+	ev.ctrl_pressed = ctrl
+	_unhandled_input(ev)
+	await get_tree().process_frame
+
+func _quick_test() -> void:
+	# the ground a little left and right of the middle of the view
+	camera.global_position = camera.global_position
+	var view := get_viewport().get_visible_rect().size
+	var a := view * Vector2(0.4, 0.6)
+	var b := view * Vector2(0.6, 0.6)
+	var ma: Dictionary = _mouse_ray(a, 1 << (LAYER_STAGE - 1))
+	print("quick-test: ground under the mouse: ", not ma.is_empty())
+	var pts: Array = markers_root.get_children().filter(func(n): return _is_marker(n) and not n.has_meta("light") and not n.has_meta("volume") and not n.has_meta("terrain"))
+	var m: Node3D = pts[0]
+	select([m])
+	var d0: Array = (m.get_meta("data")["pos"] as Array).duplicate()
+	await _press_key(KEY_Q)
+	await _send_mouse(a, null)
+	var followed: Vector3 = m.global_position
+	print("quick-test: Q follows: moved ", followed.distance_to(ma.get("position", Vector3.ZERO)), " m from the ground point; data unchanged ", d0 == m.get_meta("data")["pos"], ", quick ", placer._quick != null)
+	await _press_key(KEY_ESCAPE)
+	print("quick-test: Esc back: ", d0 == m.get_meta("data")["pos"], " node at data ", m.position.distance_to(Vector3(d0[0], d0[1], d0[2]) * CM) < 0.01, ", quick ", placer._quick != null)
+	await _press_key(KEY_Q)
+	await _send_mouse(a, null)
+	var undo0: int = undo_stack.size()
+	await _send_mouse(a, true)
+	await _send_mouse(a, false)
+	print("quick-test: Q click: data moved ", d0 != m.get_meta("data")["pos"], ", undo +", undo_stack.size() - undo0, ", selected ", selection.has(m))
+	var n0: int = markers_root.get_child_count()
+	var md: Dictionary = m.get_meta("data")   # markers get rebuilt: the data is what stays
+	undo0 = undo_stack.size()
+	await _press_key(KEY_Q, true)
+	print("quick-test: Ctrl+Q: markers +", markers_root.get_child_count() - n0, ", undo +", undo_stack.size() - undo0, ", quick ", placer._quick != null)
+	await _send_mouse(b, null)
+	await _press_key(KEY_ESCAPE)
+	print("quick-test: Ctrl+Q Esc: markers +", markers_root.get_child_count() - n0, ", undo +", undo_stack.size() - undo0, ", selected ", selection.size(), ", original ", is_same(selection[0].get_meta("data"), md) if selection.size() else false)
+	select(markers_root.get_children().filter(func(n): return n.has_meta("data") and is_same(n.get_meta("data"), md)))
+	await _press_key(KEY_Q, true)
+	await _send_mouse(b, null)
+	await _send_mouse(b, true)
+	await _send_mouse(b, false)
+	print("quick-test: Ctrl+Q click: markers +", markers_root.get_child_count() - n0, ", copy keys ", selection[0].get_meta("data").keys(), ", same data as original ", is_same(selection[0].get_meta("data"), md))
+	undo()
+	# a light: placed, moved by Q (keeps its height), copied, range spheres
+	lighting.add_light("point")
+	var l: Node3D = selection[0]
+	var ld: Dictionary = l.get_meta("data")
+	print("quick-test: light selected shows spheres ", l.get_node("range_end").visible, " radius ", l.get_node("range_end").scale.x)
+	var y0: float = l.global_position.y
+	await _press_key(KEY_Q)
+	await _send_mouse(a, null)
+	await _send_mouse(a, true)
+	await _send_mouse(a, false)
+	print("quick-test: light Q: moved, above ground ", l.global_position.y - float(ma.get("position", Vector3.ZERO).y), " m (was ", y0, ")")
+	var c := camera.unproject_position(l.global_position)
+	var rim := camera.unproject_position(l.global_position + camera.global_transform.basis.x * float(ld["end"]) * CM)
+	var hit: Dictionary = _face_at(rim)
+	print("quick-test: Ctrl over the outer rim: ", hit.get("key", "none"), " center ", c)
+	var end0: float = ld["end"]
+	await _send_mouse(rim, true, true)
+	for k in 6:
+		await _send_mouse(rim.lerp(rim + (rim - c).normalized() * 40.0, (k + 1) / 6.0), null, true)
+	await _send_mouse(rim + (rim - c).normalized() * 40.0, false, true)
+	print("quick-test: Ctrl+drag outer: ", end0, " -> ", ld["end"], " spheres scale ", l.get_node("range_end").scale.x, " undo ok ", undo_stack.size() > 0)
+	var inner := camera.unproject_position(l.global_position + camera.global_transform.basis.x * float(ld["start"]) * CM)
+	print("quick-test: Ctrl over the inner rim: ", _face_at(inner).get("key", "none"))
+	await _press_key(KEY_Q, true)
+	await _send_mouse(b, null)
+	await _send_mouse(b, true)
+	await _send_mouse(b, false)
+	print("quick-test: light Ctrl+Q: lights ", lighting.lights().size(), ", selected is new ", selection[0] != l)
+	await get_tree().create_timer(0.5).timeout
+	get_viewport().get_texture().get_image().save_png(OS.get_cache_dir().path_join("quick-test.png"))
+	print("quick-test: done")
+	get_tree().quit()
+
 func _terrain_test() -> void:
 	terrain.add_terrain()
 	var n: Node3D = selection[0]
@@ -1825,6 +1905,8 @@ func export_package(then: Callable = Callable()) -> void:
 	log_line("Export -> " + export_path())
 	run_tool("lp2mapc.py", ["--game", game, "--library", library_dir, project_dir, export_path()], func():
 		set_status("Exported " + export_path())
+		if nav_win:
+			nav_win.after_export()
 		if then.is_valid():
 			then.call())
 
@@ -2175,6 +2257,8 @@ func _screenshot() -> void:
 		await get_tree().create_timer(4.0).timeout
 	if OS.get_cmdline_user_args().has("--input-test"):   # placing / gizmo / Ctrl+face through the real input path
 		await _input_test()
+	if OS.get_cmdline_user_args().has("--quick-test"):   # Q, Ctrl+Q, Esc and the light range spheres through the real input path
+		await _quick_test()
 	if OS.get_cmdline_user_args().has("--terrain-test"):   # add a terrain, Ctrl+drag its sides, undo / redo, save
 		await _terrain_test()
 	if OS.get_cmdline_user_args().has("--damage-test"):   # a lava volume, its inspector
@@ -2184,6 +2268,19 @@ func _screenshot() -> void:
 		print("damage-test: ", volumes.label(dv.get_meta("data")), " ", dv.get_meta("data").get("damage"))
 		camera.global_position = Vector3(83, 45, -110)
 		camera.look_at(Vector3(83, 30, -126))
+	if OS.get_cmdline_user_args().has("--force-test"):   # a man cannon volume: its arrow, predicted arc, inspector
+		_push_undo("")
+		var fv: Node3D = volumes.place_volume("force", Vector3(83, 30.4, -126))
+		fv.get_meta("data")["force"]["vector"] = [0.0, 14.0, -12.0]
+		volumes.update_marker(fv)
+		volumes.target_picking = fv
+		volumes.picked_target(Vector3(83, 31, -150))   # as a click there would
+		_after_structure([fv])
+		select([fv])
+		print("force-test: ", volumes.label(fv.get_meta("data")), " ", fv.get_meta("data").get("force"), " ",
+			volumes.force_hint(fv.get_meta("data")["force"]))
+		camera.global_position = Vector3(110, 50, -110)
+		camera.look_at(Vector3(83, 32, -140))
 	if OS.get_cmdline_user_args().has("--script-test"):   # a trigger turns a lava volume on and off; a timer logs
 		_push_undo("")
 		var trig: Node3D = volumes.place_volume("weather", Vector3(83, 30.4, -126))
@@ -3271,6 +3368,10 @@ func _pick(mp: Vector2) -> Node3D:
 func _face_at(mp: Vector2) -> Dictionary:
 	# the side under the mouse that Ctrl+drag pushes / pulls: a selected terrain's or a volume's face (the nearer);
 	# "mod" = the script that drags it
+	var lh: Dictionary = lighting.face_hit(mp)   # a selected light's range spheres come first: they're thin to hit
+	if not lh.is_empty():
+		lh["mod"] = lighting
+		return lh
 	var th: Dictionary = terrain.face_hit(mp)
 	var vh: Dictionary = volumes.face_hit(mp)
 	if not th.is_empty() and (vh.is_empty() or not vh["sel"] or th["t"] < vh["t"]):
@@ -3368,6 +3469,51 @@ func ungroup_selected() -> void:
 			log_line("Ungrouped into %d parts." % parts.size())
 		out.append_array(parts)
 	_after_structure(out)
+
+func quick_duplicate() -> void:
+	# Ctrl+Q: a copy of the one selected item follows the mouse, as Quick place; Esc takes it away again
+	if selection.size() != 1 or _is_wall(selection[0]):
+		set_status("Quick duplicate (Ctrl+Q): select one item first")
+		return
+	var n: Node3D = selection[0]
+	if _is_marker(n) and not n.has_meta("light") and not n.has_meta("volume") and not n.has_meta("terrain") and set_index < 0:
+		log_line("This layout has no marker set to place into.")
+		return
+	placer.cancel_quick()
+	_push_undo("")
+	var copy: Node3D
+	if n.has_meta("light"):
+		copy = lighting.duplicate_lights([n])[0]
+	elif n.has_meta("volume"):
+		copy = volumes.duplicate_volumes([n])[0]
+	elif n.has_meta("terrain"):
+		copy = terrain.duplicate_terrains([n])[0]
+	elif _is_marker(n):
+		copy = placer.duplicate_marker(n)
+	else:
+		copy = geometry.duplicate_piece(n, Vector3.ZERO)
+	_after_structure([copy])
+	placer.quick(copy, n)
+
+func cancel_copy(copy: Node3D, original: Node3D, data: Variant, twins: Array) -> void:
+	# Esc on a Quick duplicate: as if it never happened (delete_selected's undo step and the copy's both go)
+	for j in layout.get("sets", []).size():
+		for key in ["points", "objects"]:
+			var arr: Array = layout["sets"][j].get(key, [])
+			for i in range(arr.size() - 1, -1, -1):
+				if twins.slice(1).any(func(t): return is_same(t, arr[i])):
+					arr.remove_at(i)
+	select([copy])
+	delete_selected()
+	undo_stack.pop_back()
+	undo_stack.pop_back()
+	if data != null:   # a marker's node was rebuilt when the copy went
+		original = null
+		for m in markers_root.get_children():
+			if not m.is_queued_for_deletion() and m.has_meta("data") and is_same(m.get_meta("data"), data):
+				original = m
+	if original != null:
+		select([original])
 
 func duplicate_selected() -> void:
 	var ps := _pieces_selected()
@@ -3747,6 +3893,19 @@ func _unhandled_input(e: InputEvent) -> void:
 		camera.stop_look()   # its release went to another window: don't swallow clicks until the next right click
 	if camera.is_looking() or preview.active():
 		return
+	if volumes.target_picking != null:   # a force volume's Pick target: the next click on the level is where it lands
+		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
+			var th := _mouse_ray(e.position, (1 << (LAYER_COLLISION - 1)) | (1 << (LAYER_STAGE - 1)))
+			if th:
+				volumes.picked_target(th["position"])
+			else:
+				set_status("Nothing there: click the level (Esc cancels)")
+			get_viewport().set_input_as_handled()
+			return
+		if e is InputEventKey and e.pressed and e.keycode == KEY_ESCAPE:
+			volumes.stop_target_pick()
+			get_viewport().set_input_as_handled()
+			return
 	if scripts_win and scripts_win.picking:   # the script window's eyedropper: a click adds what's under it to the script
 		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
 			scripts_win.picked(_pick(e.position))
@@ -3876,6 +4035,8 @@ func _unhandled_input(e: InputEvent) -> void:
 				redo()
 			elif k == KEY_D:
 				duplicate_selected()
+			elif k == KEY_Q and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+				quick_duplicate()
 			elif k == KEY_G and e.shift_pressed:
 				ungroup_selected()
 			elif k == KEY_G:
@@ -3899,12 +4060,13 @@ func _unhandled_input(e: InputEvent) -> void:
 			KEY_T:
 				toggle_placer()
 			KEY_Q:
-				var ms: Array = selection.filter(func(n): return _is_marker(n) and not n.has_meta("volume") \
-					and not n.has_meta("light") and not n.has_meta("terrain"))
+				if Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):   # flying: Q goes down
+					return
+				var ms: Array = selection.filter(func(n): return _is_marker(n) and not n.has_meta("volume") and not n.has_meta("terrain"))
 				if ms.size() == 1:
 					placer.quick(ms[0])
 				else:
-					set_status("Quick place (Q): select one spawn point, pickup, VS or data post first")
+					set_status("Quick place (Q): select one spawn point, pickup, VS, data post or light first")
 			KEY_H:
 				toggle_fog()
 			KEY_N:

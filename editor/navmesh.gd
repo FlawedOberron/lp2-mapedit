@@ -304,6 +304,14 @@ func build() -> void:
 		show_box.button_pressed = true
 		_update_view())
 
+# the export builds the navmesh itself when the map changed: show that one
+func after_export() -> void:
+	var res: Variant = JSON.parse_string(FileAccess.get_file_as_string(main.project_dir.path_join(".preview/navmesh.json")))
+	if res is Dictionary:
+		main.project["navmesh"] = res
+		refresh()
+		_update_view()
+
 func preview_radar() -> void:
 	if main.project_dir == "":
 		return

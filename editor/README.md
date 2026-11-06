@@ -22,8 +22,11 @@ project.
   - VS = orange boxes, weapons = yellow, other objects (posts...) = purple
   - every marker has a dot that stays visible from across the map
   - **Place (T)** also adds **Data posts** (for the Data Post game type; maps started empty have none until you do).
-  - **Quick place (Q):** with one spawn, pickup, VS or data post selected, click where it goes and drag to aim it
-    (Ctrl or Snap: 15 degree steps); Esc cancels.
+  - **Quick place (Q):** with one spawn, pickup, VS, data post or light selected, it follows the mouse; click where it goes
+    and drag to aim it (Ctrl or Snap: 15 degree steps). A light keeps its height above the ground. Esc cancels.
+  - **Quick duplicate (Ctrl+Q):** the same with a copy of the one selected item (also volumes, terrains and level pieces);
+    Esc takes the copy away again.
+  - **Light ranges:** a selected light shows its inner and outer range as wire spheres; Ctrl+drag a sphere's lines to size it.
 - **Level geometry:** the stage is split into pieces (lp2pieces.py: connected parts, near ones joined).
   - Click to select (Shift / Ctrl+click adds); clicking never moves anything.
   - **Gizmo:** W move, E rotate, R scale; drag an axis handle, or the centre ball (move on the view plane /
@@ -37,6 +40,10 @@ project.
     the baked lighting; dynamic ones get light but cast none. Placed imported meshes and library pieces are baked with
     the map (editor and export); after moving one, bake again.
 - Selected pieces show a wireframe of their edges (bright, and faint through walls).
+- **Lightmap (new, Lighting window):** set *Lightmap (cm a texel)* above 0 and the export bakes light into textures, as the
+  game's own stages do: clean, straight shadow edges and no light under walls. About 8 is a good start; if the map doesn't
+  fit 32 pages (up to 23 MB) the texels get bigger and the export log says so. Only the area round your markers gets texels;
+  the rest stays vertex lit. The editor's view still shows the vertex bake. Not yet tested in game.
 - **Browser (B)**: a floating window with thumbnails. Prefabs: make one from the selected pieces, place
   copies (where the view points) or double-click; copies reuse the stage's own geometry and textures.
   In the level: every piece, filterable; click selects, double-click frames.

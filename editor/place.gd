@@ -27,7 +27,12 @@ var _node: Node3D = null   # the marker being placed
 var _press := Vector2.ZERO
 var _origin := Vector3.ZERO
 var _copies: Array = []    # the placed marker's data and its copies in the other layouts
-var _quick: Node3D = null  # Quick place (Q): the selected marker the next click moves (then drag to aim)
+var _quick: Node3D = null  # Quick place (Q): the item following the mouse; the next click puts it down (then drag to aim)
+var _quick_copy: Node3D = null   # Ctrl+Q: the original of the copy in _quick (Esc takes the copy away and selects this again)
+var _quick_copy_data: Variant = null   # its data: a marker's node is rebuilt when a copy goes
+var _quick_at := Vector3.ZERO    # from the point under the mouse to the item's origin
+var _quick_skip: Array = []      # the item's own collision: the mouse's ray goes through it
+var _quick_done := false         # the click was a Quick place: _end finishes it, whatever the item
 
 func _twin_sets(i: int) -> Array:
 	# the other layouts' sets with the same LP1 mode digits (ids 00 10 30 40 -> 01 11 31 41 ...)
@@ -162,17 +167,110 @@ func _thumb_key(t: Array) -> String:
 func placing() -> bool:
 	return visible or _node != null or _quick != null
 
-func quick(n: Node3D) -> void:
-	# Quick place: the next click puts this marker there, a drag aims it (about the up axis), Esc cancels
+func quick(n: Node3D, copy_of: Node3D = null) -> void:
+	# Quick place: this item follows the mouse, the next click puts it there, a drag aims it (about the up axis), Esc cancels.
+	# Only the node moves until the click, so an item's data (and the undo taken then) still has where it was.
 	_quick = n
-	main.set_status("Quick place: click where it goes, drag to aim (Ctrl or Snap: 15° steps). Esc cancels.")
+	_quick_copy = copy_of
+	_quick_copy_data = copy_of.get_meta("data") if copy_of and copy_of.has_meta("data") else null
+	_quick_at = _anchor(n)
+	_quick_skip = []
+	_bodies(n, _quick_skip)
+	_follow(main.get_viewport().get_mouse_position())
+	var what := "Quick duplicate" if copy_of else "Quick place"
+	main.set_status("%s: click where it goes%s. Esc cancels." % [what, ", drag to aim (Ctrl or Snap: 15° steps)" if _aims(n) else ""])
+
+func _aims(n: Node3D) -> bool:
+	# a drag aims spawns, pickups, VS, posts and spot lights; the rest have no front
+	if not main._is_marker(n) or n.has_meta("volume") or n.has_meta("terrain"):
+		return false
+	return not n.has_meta("light") or (n.get_meta("data") as Dictionary).get("type") == "spot"
+
+func _anchor(n: Node3D) -> Vector3:
+	if n.has_meta("light"):   # stays as high above the ground as it was
+		var from: Vector3 = n.global_position + Vector3.UP * 0.5
+		var hit: Dictionary = main._ray(from, from + Vector3.DOWN * 2000.0, 1 << (main.LAYER_STAGE - 1))
+		return Vector3(0, maxf(0.3, n.global_position.y - hit["position"].y) if hit else 2.0, 0)
+	if main._is_marker(n) and not n.has_meta("terrain"):
+		return Vector3(0, 5.0 * main.CM, 0) if not n.has_meta("volume") else Vector3.ZERO   # 5 cm up, as placed markers
+	# a piece or terrain: the middle of its underside goes to the mouse
+	var box := _bounds(n, AABB(), false)
+	if box.size == Vector3.ZERO:
+		return Vector3.ZERO
+	return n.global_position - (box.get_center() - Vector3(0, box.size.y / 2.0, 0))
+
+func _bounds(n: Node, box: AABB, have: bool) -> AABB:
+	for c in n.get_children():
+		if c is MeshInstance3D and (c as MeshInstance3D).mesh and (c as MeshInstance3D).visible:
+			var b: AABB = (c as MeshInstance3D).global_transform * (c as MeshInstance3D).get_aabb()
+			box = box.merge(b) if have else b
+			have = true
+		var sub := _bounds(c, box, have)
+		if sub != box:
+			box = sub
+			have = true
+	return box
+
+func _bodies(n: Node, out: Array) -> void:
+	if n is CollisionObject3D:
+		out.append((n as CollisionObject3D).get_rid())
+	for c in n.get_children():
+		_bodies(c, out)
+
+func _under_mouse(mp: Vector2) -> Dictionary:
+	var from: Vector3 = main.camera.project_ray_origin(mp)
+	return main._ray(from, from + main.camera.project_ray_normal(mp) * 5000.0, 1 << (main.LAYER_STAGE - 1), _quick_skip)
+
+func _follow(mp: Vector2) -> void:
+	if not is_instance_valid(_quick):
+		return
+	var hit := _under_mouse(mp)
+	if hit:
+		_quick.global_position = hit["position"] + _quick_at
+		main._place_gizmo()
 
 func cancel_quick() -> bool:
 	if _quick == null:
 		return false
+	var n: Node3D = _quick if is_instance_valid(_quick) else null
+	var copy_of: Node3D = _quick_copy
+	var data: Variant = _quick_copy_data
 	_quick = null
+	_quick_copy = null
+	_quick_copy_data = null
+	if n and copy_of:   # the copy goes, and so does the undo step that made it
+		main.cancel_copy(n, copy_of if is_instance_valid(copy_of) else null, data, _copies)
+		_copies = []
+		main.set_status("Quick duplicate cancelled")
+		return true
+	if n and n.has_meta("data"):
+		main._place(n)   # back where its data says
+		main._place_gizmo()
 	main.set_status("Quick place cancelled")
 	return true
+
+func duplicate_marker(n: Node3D) -> Node3D:
+	# a copy of a spawn, pickup, VS or post in the shown set, and in the other layouts' as a placed one is
+	var src: Dictionary = n.get_meta("data")
+	var d: Dictionary = src.duplicate(true)
+	d.erase("id")   # scripts point at the original
+	d["placed"] = true
+	var is_object: bool = n.get_meta("object")
+	var key := "objects" if is_object else "points"
+	var s: Dictionary = main.layout["sets"][main.set_index]
+	if d.get("role") == "object":
+		d["post"] = main.next_post_number(s)
+	s[key].append(d)
+	main._add_marker(d, is_object)
+	_copies = [d]
+	if all_layouts.button_pressed:
+		for j in _twin_sets(main.set_index):
+			var c: Dictionary = d.duplicate(true)
+			if d.get("role") == "object":
+				c["post"] = main.next_post_number(main.layout["sets"][j])
+			main.layout["sets"][j][key].append(c)
+			_copies.append(c)
+	return main.markers_root.get_child(main.markers_root.get_child_count() - 1)
 
 func _marker_data() -> Variant:
 	var i := item_pick.selected
@@ -199,6 +297,12 @@ func _marker_data() -> Variant:
 
 # main._unhandled_input hands mouse events here first while placing; true = used
 func handle(e: InputEvent) -> bool:
+	if _quick and not is_instance_valid(_quick):   # an undo or a layout change rebuilt it
+		_quick = null
+		_quick_copy = null
+	if e is InputEventMouseMotion and _quick and not Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT):
+		_follow(e.position)
+		return false   # the view still sees the mouse
 	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT:
 		if e.pressed and _quick:
 			_begin_quick(e.position)
@@ -291,21 +395,28 @@ func _begin(mp: Vector2) -> void:
 	_press = mp
 
 func _begin_quick(mp: Vector2) -> void:
-	var hit: Dictionary = main._mouse_ray(mp, 1 << (main.LAYER_STAGE - 1))
+	var hit := _under_mouse(mp)
 	if not hit:
 		main.set_status("Nothing of the level under the mouse: click on the map (Esc cancels)")
 		return
-	main._push_undo("")
+	if _quick_copy == null:
+		main._push_undo("")   # a copy took its undo step when it was made
+	else:
+		_quick_copy = null
+		_quick_copy_data = null
 	_node = _quick
 	_quick = null
+	_quick_done = true
 	_origin = hit["position"]
-	_node.global_position = _origin + Vector3(0, 5.0 * main.CM, 0)   # 5 cm up, as placed markers
-	main._store_marker(_node)
-	_copies = []
+	_node.global_position = _origin + _quick_at
+	if main._is_marker(_node):
+		main._store_marker(_node)
+	if _copies.is_empty() or not _node.has_meta("data") or not is_same(_copies[0], _node.get_meta("data")):
+		_copies = []
 	_press = mp
 
 func _aim(mp: Vector2) -> void:
-	if mp.distance_to(_press) < AIM_PX:
+	if mp.distance_to(_press) < AIM_PX or (_quick_done and not _aims(_node)):
 		return
 	var from: Vector3 = main.camera.project_ray_origin(mp)
 	var at: Variant = Plane(Vector3.UP, _origin.y).intersects_ray(from, main.camera.project_ray_normal(mp))
@@ -343,12 +454,28 @@ func _drag_floor(at: Vector3) -> void:
 	main.volumes.update_marker(_node)
 
 func _sync_copies() -> void:
+	if _copies.is_empty():
+		return
 	var d: Dictionary = _node.get_meta("data")
 	for c in _copies.slice(1):
 		c["pos"] = d["pos"].duplicate()
 		c["yaw"] = d["yaw"]
 
 func _end() -> void:
+	if _quick_done:
+		_quick_done = false
+		var q := _node
+		if main._is_marker(q):
+			main._store_marker(q)
+			_sync_copies()
+		_node = null
+		_copies = []
+		_last_place = Time.get_ticks_msec()
+		main._rebuild_outliner()
+		main.select([q])
+		main._update_stats()
+		main.set_status("Placed")
+		return
 	if _node.has_meta("volume"):
 		var v := _node
 		_node = null

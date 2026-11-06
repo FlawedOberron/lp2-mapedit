@@ -20,6 +20,12 @@ extends Node
 #                     a one-way wall: those ticked may cross the box along its arrow only (its yaw, as markers'); going
 #                     back through it, characters are held, bullets and grenades vanish (map.json "oneway_volumes", xlive
 #                     mod oneway.cpp)
+#   "force": {"mode": "continuous" | "impulse" | "velocity", "vector": [x, y, z], "local": bool,
+#             "players": bool, "vs": bool, "bullets": bool, "grenades": bool, "akrid": bool}
+#                     pushes what's ticked: continuous = an acceleration while inside (m/s per second: wind, currents),
+#                     impulse = m/s added once on entering (again after leaving), velocity = the velocity set to m/s on
+#                     entering (grav lifts, man cannons); "local": the vector turns with the box's yaw (z along -arrow)
+#                     (map.json "force_volumes", xlive mod force.cpp)
 #   "limits": true    map limits: marks the playable space, no effect in the game. Several (or one with extra boxes) make
 #                     an odd shape: inside any of them counts. With any limits volume, the navmesh keeps only what's
 #                     inside (lp2navmap.py); later also the radar's extent
@@ -39,14 +45,18 @@ const COLOURS := {"kill": Color(0.95, 0.15, 0.15), "gravity": Color(0.25, 0.55, 
 	"weather": Color(0.3, 0.85, 0.8), "water": Color(0.15, 0.4, 0.95), "sound": Color(0.95, 0.7, 0.2),
 	"damage": Color(1.0, 0.45, 0.05), "marker": Color(1.0, 0.9, 0.2),
 	"oneway": Color(0.3, 1.0, 0.45), "limits": Color(0.85, 0.85, 0.95),
-	"barrier": Color(0.55, 0.75, 1.0), "none": Color(0.6, 0.6, 0.6)}
+	"barrier": Color(0.55, 0.75, 1.0), "force": Color(0.2, 0.95, 0.95), "none": Color(0.6, 0.6, 0.6)}
 const ADD := [["kill", "Kill volume (pit)"], ["gravity", "Gravity volume"], ["post", "Post-process volume (screen colour)"],
 	["weather", "Weather limiter volume (indoors)"], ["water", "Water volume (surface at its top)"],
 	["sound", "Sound volume (reverb zone)"], ["damage", "Damage volume (lava, fire)"],
 	["marker", "Script marker (a named point for scripts)"], ["oneway", "One-way wall (pass along its arrow only)"],
-	["limits", "Map limits (marks the level's bounds)"], ["barrier", "Barrier (invisible wall / roof, no grapple)"]]
+	["force", "Force volume (lift, man cannon, wind)"], ["limits", "Map limits (marks the level's bounds)"], ["barrier", "Barrier (invisible wall / roof, no grapple)"]]
 const ONEWAY := {"players": true, "vs": true, "bullets": false, "grenades": false, "akrid": false}   # a new one
 const ONEWAY_NAMES := [["players", "Players"], ["vs", "VS"], ["bullets", "Bullets"], ["grenades", "Grenades"], ["akrid", "Akrid"]]
+const FORCE := {"mode": "velocity", "vector": [0.0, 15.0, 0.0], "local": true, "players": true, "vs": true,
+	"bullets": false, "grenades": false, "akrid": false}   # a new one: a grav lift
+const FORCE_MODES := [["continuous", "Continuous force (m/s per second, while inside)"],
+	["impulse", "Immediate force (m/s added on entering)"], ["velocity", "Immediate velocity (m/s set on entering)"]]
 const DAMAGE := {"player": 0.0, "vs": 10.0, "player_kill": true, "vs_kill": false}   # a new one: lava
 # the stock maps' reverb presets (lp2-tools sound_presets.json): key, name (decay time)
 const REVERBS := [["15_inside", "Frozen Wasteland, inside (1.5 s)"], ["02_inside", "Kraftwerk, inside: big hall (4.3 s)"],
@@ -76,6 +86,17 @@ var oneway_on: CheckBox
 var oneway_flags := {}       # players / vs / bullets / grenades / akrid
 var oneway_rows: Array = []
 var marker_name: LineEdit
+var force_on: CheckBox
+var force_mode: OptionButton
+var force_spins: Array = []   # x / y / z
+var force_local: CheckBox
+var force_flags := {}         # players / vs / bullets / grenades / akrid
+var force_rows: Array = []
+var force_note: Label
+var force_target_rows: Array = []   # shown for impulse / velocity
+var force_arc_spin: SpinBox
+var force_target_btn: Button
+var target_picking: Node3D = null   # the volume whose landing point the next click sets
 var sound_on: CheckBox
 var reverb_pick: OptionButton
 var sound_rows: Array = []   # the sound post-process controls, shown while it's on
@@ -176,6 +197,70 @@ func setup(m: Node, right: VBoxContainer) -> void:
 	g.add_child(ol)
 	g.add_child(of)
 	oneway_rows += [ol, of]
+	force_on = _check(g, "Force", "Pushes what's ticked: a steady push while inside (wind, currents), a kick on entering, or a "
+		+ "new velocity on entering (grav lifts, man cannons). Players and VS keep what they're given in the air and stop on "
+		+ "the ground; grenades get it as their own velocity (xlive mod)")
+	g.add_child(Control.new())
+	var fml: Label = main._label("  Mode")
+	force_mode = OptionButton.new()
+	for fm in FORCE_MODES:
+		force_mode.add_item(fm[1])
+	force_mode.item_selected.connect(func(_i): _on_changed())
+	g.add_child(fml)
+	g.add_child(force_mode)
+	force_rows += [fml, force_mode]
+	for a in [["X", "Sideways (local: the box's own x)"], ["Y", "Up"], ["Z", "Local: back from the arrow; the arrow is -Z"]]:
+		var l: Label = main._label("  " + a[0] + " (m/s)")
+		var sp: SpinBox = main._spin(-500.0, 500.0, 0.5)
+		sp.tooltip_text = a[1]
+		sp.value_changed.connect(func(_v): _on_changed())
+		g.add_child(l)
+		g.add_child(sp)
+		force_spins.append(sp)
+		force_rows += [l, sp]
+	var fll: Label = main._label("")
+	force_local = CheckBox.new()
+	force_local.text = "Turns with the box (local)"
+	force_local.tooltip_text = "On: the vector follows the box's yaw (Z along its arrow is -Z), so turning the box aims it"
+	force_local.toggled.connect(func(_b): _on_changed())
+	g.add_child(fll)
+	g.add_child(force_local)
+	force_rows += [fll, force_local]
+	var ffl: Label = main._label("  Affects")
+	var ff := HFlowContainer.new()
+	for k in ONEWAY_NAMES:
+		var fc := CheckBox.new()
+		fc.text = k[1]
+		fc.toggled.connect(func(_b): _on_changed())
+		ff.add_child(fc)
+		force_flags[k[0]] = fc
+	g.add_child(ffl)
+	g.add_child(ff)
+	force_rows += [ffl, ff]
+	var tgl: Label = main._label("  Target")
+	var th := HBoxContainer.new()
+	force_target_btn = Button.new()
+	force_target_btn.text = "Pick target…"
+	force_target_btn.tooltip_text = ("Click it, then click where things launched from the box should land: X / Y / Z are worked out "
+		+ "for that (the arc's peak this high above the higher end; the mod's air drag allowed for). Moving or turning the box "
+		+ "works them out again; typing X / Y / Z drops the target")
+	force_target_btn.pressed.connect(_start_target_pick)
+	th.add_child(force_target_btn)
+	th.add_child(main._label(" Arc (m)"))
+	force_arc_spin = main._spin(0.0, 200.0, 0.5)
+	force_arc_spin.tooltip_text = "How high the path's peak is above the higher of the launch and the target"
+	force_arc_spin.value_changed.connect(func(_v): _on_changed())
+	th.add_child(force_arc_spin)
+	g.add_child(tgl)
+	g.add_child(th)
+	force_target_rows = [tgl, th]
+	force_rows += force_target_rows
+	g.add_child(main._label(""))
+	force_note = main._label("")
+	force_note.add_theme_color_override("font_color", Color(0.65, 0.65, 0.7))
+	g.add_child(force_note)
+	force_rows.append(force_note)
+	force_rows.append(g.get_child(g.get_child_count() - 2))
 	sound_on = _check(g, "Sound post-process", "The game's reverb while the player is inside, from a stock map's (outside: the "
 		+ "map's own). Combines with the other effects, e.g. a building's weather limiter. The game's own sound zones, no xlive mod")
 	g.add_child(Control.new())
@@ -352,6 +437,8 @@ static func effects(d: Dictionary) -> Array:
 		out.append("damage")
 	if d.get("oneway"):
 		out.append("oneway")
+	if d.get("force"):
+		out.append("force")
 	if d.get("limits", false):
 		out.append("limits")
 	if d.get("barrier", false):
@@ -372,6 +459,7 @@ static func label(d: Dictionary) -> String:
 			else "reverb: " + reverb_name(str(d["sound"].get("reverb", ""))).get_slice(" (", 0) if e == "sound"
 			else "damage" if e == "damage"
 			else "one-way" if e == "oneway"
+			else "force (%s)" % str(d["force"].get("mode", "continuous")) if e == "force"
 			else "map limits" if e == "limits"
 			else "barrier" if e == "barrier"
 			else "marker " + str(d["marker"]) if e == "marker"
@@ -488,6 +576,25 @@ func update_marker(n: Node3D) -> void:
 		for e in [[0, 1], [1, 3], [3, 2], [2, 0], [4, 5], [5, 7], [7, 6], [6, 4], [0, 4], [1, 5], [2, 6], [3, 7]]:
 			lines.append(b.get_endpoint(e[0]))
 			lines.append(b.get_endpoint(e[1]))
+	if d.get("force") and bs:   # the force's direction: an arrow from the box's centre, longer for more
+		var vec := force_world(d, false)
+		if vec.length() > 0.001:
+			var b0: AABB = bs[0]
+			var from := b0.get_center()
+			var dir := vec.normalized()
+			var tip := from + dir * clampf(vec.length() * 0.1, 0.5, 4.0)
+			var side := dir.cross(Vector3.UP if absf(dir.y) < 0.9 else Vector3.RIGHT).normalized() * 0.25
+			for q in [[from, tip], [tip, tip - dir * 0.4 + side], [tip, tip - dir * 0.4 - side]]:
+				lines.append(q[0])
+				lines.append(q[1])
+	if d.get("force") and bs:
+		if d["force"].has("target") and str(d["force"].get("mode", "")) != "continuous":
+			solve_target(n, d)
+			var tl: Vector3 = n.to_local(_v3(d["force"]["target"]) * main.CM) if n.is_inside_tree() else Vector3.ZERO
+			for ax in [Vector3(0.4, 0, 0), Vector3(0, 0.4, 0), Vector3(0, 0, 0.4)]:   # the target: a cross
+				lines.append(tl - ax)
+				lines.append(tl + ax)
+		lines.append_array(force_arc(n, d, bs))
 	if (d.has("marker") or d.get("oneway")) and bs:   # facing: an arrow along -z at half height, like the spawn markers' cone
 		var b0: AABB = bs[0]
 		var h := b0.position.y + b0.size.y / 2
@@ -592,6 +699,9 @@ func place_volume(effect: String, at: Vector3) -> Node3D:
 		"barrier":
 			d["barrier"] = true
 			d["size"] = [1000.0, 600.0, 20.0]   # a thin wall
+		"force":
+			d["force"] = FORCE.duplicate(true)
+			d["size"] = [300.0, 600.0, 300.0]   # a lift shaft
 		"oneway":
 			d["oneway"] = ONEWAY.duplicate()
 			d["size"] = [1000.0, 600.0, 100.0]   # a thin wall
@@ -678,6 +788,26 @@ func show_inspector(selection: Array) -> void:
 		oneway_flags[k].button_pressed = ow.get(k, ONEWAY[k] if ow.is_empty() else false)
 	for c in oneway_rows:
 		c.visible = oneway_on.button_pressed
+	var fo: Dictionary = d.get("force") if d.get("force") else {}
+	force_on.button_pressed = not fo.is_empty()
+	var fq: Dictionary = fo if not fo.is_empty() else FORCE
+	force_mode.selected = maxi(0, FORCE_MODES.map(func(m): return m[0]).find(str(fq.get("mode", "continuous"))))
+	var fv: Array = fq.get("vector", [0, 0, 0])
+	for a in 3:
+		force_spins[a].value = float(fv[a])
+	force_local.button_pressed = fq.get("local", true)
+	for k in force_flags:
+		force_flags[k].button_pressed = fq.get(k, false)
+	force_note.text = force_hint(fq)
+	if fq.has("target"):
+		var t: Array = fq["target"]
+		force_note.text += "\nTarget: %.0f, %.0f, %.0f m" % [float(t[0]) / 100.0, float(t[1]) / 100.0, float(t[2]) / 100.0]
+	force_arc_spin.value = float(fq.get("arc", 3.0))
+	force_target_btn.text = "Picking… (Esc)" if target_picking == vs[0] else ("Re-pick target…" if fq.has("target") else "Pick target…")
+	for c in force_rows:
+		c.visible = force_on.button_pressed
+	for c in force_target_rows:
+		c.visible = force_on.button_pressed and fq.get("mode", "continuous") != "continuous"
 	weather_spin.value = float(d.get("weather", 0.0))
 	weather_spin.editable = weather_on.button_pressed
 	gravity_on.button_pressed = d.has("gravity")
@@ -748,6 +878,29 @@ func _on_changed() -> void:
 		d["oneway"] = ow
 	else:
 		d.erase("oneway")
+	if force_on.button_pressed:
+		var fo := {"mode": FORCE_MODES[force_mode.selected][0],
+			"vector": [force_spins[0].value, force_spins[1].value, force_spins[2].value], "local": force_local.button_pressed}
+		var was_off: bool = not d.get("force")
+		for k in force_flags:
+			fo[k] = FORCE[k] if was_off else force_flags[k].button_pressed
+		if was_off:
+			fo = FORCE.duplicate(true)
+		else:
+			var old: Dictionary = d["force"]
+			fo["arc"] = force_arc_spin.value
+			var ov: Array = old.get("vector", [0, 0, 0])
+			var typed := false
+			for a in 3:
+				typed = typed or absf(float(ov[a]) - force_spins[a].value) > 0.001
+			# the target stays unless X / Y / Z were typed or the mode went continuous
+			if old.has("target") and not typed and fo["mode"] != "continuous":
+				fo["target"] = old["target"]
+				if fo["local"] != old.get("local", true):
+					fo["vector"] = ov   # re-solved below in the new frame
+		d["force"] = fo
+	else:
+		d.erase("force")
 	if gravity_on.button_pressed:
 		d["gravity"] = gravity_spin.value
 	else:
@@ -764,6 +917,136 @@ func _on_changed() -> void:
 	var item: Variant = n.get_meta("item") if n.has_meta("item") else null
 	if item != null and is_instance_valid(item):
 		(item as TreeItem).set_text(0, label(d))
+
+static func force_world(d: Dictionary, world: bool) -> Vector3:
+	# the force's vector (m/s or m/s per second) in the volume's frame (world false) or the map's (world true)
+	var f: Dictionary = d.get("force", {})
+	var a: Array = f.get("vector", [0, 0, 0])
+	var v := Vector3(float(a[0]), float(a[1]), float(a[2]))
+	var local: bool = f.get("local", true)
+	var turn := Basis(Vector3.UP, deg_to_rad(float(d.get("yaw", 0.0))))
+	if world:
+		return turn * v if local else v
+	return v if local else turn.inverse() * v
+
+func _start_target_pick() -> void:
+	var vs: Array = main.selection.filter(func(n): return is_instance_valid(n) and is_volume(n))
+	if vs.size() != 1:
+		return
+	target_picking = vs[0]
+	main.set_status("Click where it should land (Esc cancels)")
+	show_inspector(vs)
+
+func stop_target_pick() -> void:
+	var n := target_picking
+	target_picking = null
+	if n and is_instance_valid(n):
+		show_inspector([n])
+
+func picked_target(at: Vector3) -> void:
+	# the click's point (metres) as the volume's target: X / Y / Z solved for it
+	var n := target_picking
+	target_picking = null
+	if n == null or not is_instance_valid(n):
+		return
+	main._push_undo("")
+	var f: Dictionary = n.get_meta("data")["force"]
+	f["target"] = [snappedf(at.x / main.CM, 1.0), snappedf(at.y / main.CM, 1.0), snappedf(at.z / main.CM, 1.0)]
+	f["arc"] = float(f.get("arc", 3.0))   # the spin sets it through _on_changed
+	update_marker(n)
+	show_inspector([n])
+	main.log_line("Force volume aimed: " + force_hint(f))
+
+func solve_target(n: Node3D, d: Dictionary) -> void:
+	# launch velocity from the box's floor centre to its target: the peak "arc" m above the higher end, gravity the
+	# map's, horizontal speed allowing for the mod's air drag (0.15/s, none vertically)
+	var f: Dictionary = d["force"]
+	var bs := _boxes(n)
+	if bs.is_empty() or not n.is_inside_tree():
+		return
+	var b0: AABB = bs[0]
+	var p0: Vector3 = n.to_global(Vector3(b0.get_center().x, b0.position.y + 0.05, b0.get_center().z))
+	var t: Vector3 = _v3(f["target"]) * main.CM
+	var g := 9.8 * float(main.lighting.env().get("gravity", 1.0))
+	if g <= 0.0:
+		return
+	var top := maxf(p0.y, t.y) + maxf(0.0, float(f.get("arc", 3.0)))
+	var vy := sqrt(2.0 * g * (top - p0.y))
+	var time := vy / g + sqrt(2.0 * (top - t.y) / g)
+	var flat := Vector2(t.x - p0.x, t.z - p0.z)
+	var k := 0.15
+	var speed := flat.length() * k / (1.0 - exp(-k * time)) if time > 0.001 else 0.0
+	var hv := flat.normalized() * speed if flat.length() > 0.001 else Vector2.ZERO
+	var w := Vector3(hv.x, vy, hv.y)
+	if f.get("local", true):
+		w = Basis(Vector3.UP, deg_to_rad(float(d.get("yaw", 0.0)))).inverse() * w
+	f["vector"] = [snappedf(w.x, 0.01), snappedf(w.y, 0.01), snappedf(w.z, 0.01)]
+
+func force_arc(n: Node3D, d: Dictionary, bs: Array) -> PackedVector3Array:
+	# the predicted path of something standing at the box's floor centre: pushed as the xlive mod pushes it (the force
+	# while inside for continuous, the kick / new velocity at once otherwise), falling with the map's gravity, the mod's
+	# air drag; ends where it hits the level (or after 8 s). Line pairs in the volume's frame, metres.
+	var out := PackedVector3Array()
+	var f: Dictionary = d["force"]
+	var mode := str(f.get("mode", "continuous"))
+	var acc := force_world(d, false)
+	var g := 9.8 * float(main.lighting.env().get("gravity", 1.0))
+	var b0: AABB = bs[0]
+	var p := Vector3(b0.get_center().x, b0.position.y + 0.05, b0.get_center().z)
+	var v := Vector3.ZERO if mode == "continuous" else acc
+	var air := mode != "continuous" and v.y > 0.0
+	var dt := 1.0 / 30.0
+	var mask: int = 1 << (main.LAYER_STAGE - 1)
+	for i in 240:
+		var inside: bool = bs.any(func(b: AABB): return b.has_point(p))
+		if mode == "continuous" and inside:
+			v += acc * dt
+			if not air and v.y > g * dt:
+				air = true
+		if air:
+			v.y -= g * dt
+			v.x *= 1.0 - 0.15 * dt
+			v.z *= 1.0 - 0.15 * dt
+		else:
+			v.y = 0.0
+			v.x *= maxf(0.0, 1.0 - 10.0 * dt)
+			v.z *= maxf(0.0, 1.0 - 10.0 * dt)
+			if v.length() < 0.02 and not (mode == "continuous" and inside):
+				break
+		var q := p + v * dt
+		if n.is_inside_tree():
+			var hit: Dictionary = main._ray(n.to_global(p), n.to_global(q), mask)
+			if hit:
+				out.append(p)
+				out.append(n.to_local(hit["position"]))
+				break
+		out.append(p)
+		out.append(q)
+		p = q
+		if p.y < b0.position.y - 100.0:
+			break
+	return out
+
+static func force_hint(f: Dictionary) -> String:
+	# what the numbers do, roughly (earth gravity; the map's own gravity scales it)
+	if f.has("target") and str(f.get("mode", "")) != "continuous":
+		var vv: Array = f.get("vector", [0, 0, 0])
+		return "Aimed at the target: %.1f m/s, peak %.1f m above the higher end" % [
+			Vector3(float(vv[0]), float(vv[1]), float(vv[2])).length(), float(f.get("arc", 3.0))]
+	var a: Array = f.get("vector", [0, 0, 0])
+	var up := float(a[1])
+	var v := Vector3(float(a[0]), up, float(a[2]))
+	match str(f.get("mode", "continuous")):
+		"continuous":
+			if up > 9.8:
+				return "Lifts: %.1f m/s² net upward (gravity is 9.8)" % (up - 9.8)
+			return "Steady push of %.1f m/s²; on the ground it levels off near %.1f m/s" % [v.length(), Vector2(a[0], a[2]).length() / 10.0]
+		_:
+			if up > 0.0:
+				var flat := Vector2(float(a[0]), float(a[2])).length()
+				var t := 2.0 * up / 9.8
+				return "Rises about %.1f m, lands about %.1f m away (no drag)" % [up * up / 19.6, flat * t]
+			return "%.1f m/s" % v.length()
 
 # ---------------------------------------------------------------- Ctrl+drag a face: push / pull it
 

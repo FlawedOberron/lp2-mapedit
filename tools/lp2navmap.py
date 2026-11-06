@@ -213,6 +213,7 @@ def main():
     res = dict(lnv=rel(lnv), way=rel(os.path.join(os.path.dirname(lnv), "Way_%s.rAIWayPoint" % tag)),
                polygons=int(keep.sum()), dropped=int((~keep).sum()))
     json.dump(res, open(os.path.join(prev, "navmesh.json"), "w"))
+    open(os.path.join(prev, "navmesh.stamp"), "w").write(lp2mapc.nav_stamp(folder))
     print("@result " + json.dumps(res))
 
 

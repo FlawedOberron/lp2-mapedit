@@ -18,7 +18,7 @@ const LIGHT_SIZE := 0.35
 # the ray-traced bake (lp2bake.py; project stage.light): defaults as its DEFAULTS. Live ones show at once (the
 # baked shader combines the stored light components); the rest need "Bake lighting"
 const BAKE_DEFAULTS := {"source": "lp1", "sun": 0.4, "sky": 1.0, "lights": 1.0, "glow": 1.0, "exposure": 0.0,
-	"min_light": 0.01, "bounce": 1.0, "bounces": 2, "samples": 64, "detail": 0}
+	"min_light": 0.01, "bounce": 1.0, "bounces": 2, "samples": 64, "detail": 0, "lightmap": 0}
 const BAKE_CALIBRATION := 0.48   # lp2bake.py CALIBRATION
 const BAKE_FIELDS := [
 	["sun", "Sun in bake", 0.0, 5.0, 0.05, "Strength of the sun's direct light in the bake (x the Sun colour above). Live"],
@@ -30,6 +30,7 @@ const BAKE_FIELDS := [
 	["bounces", "Bounces", 0.0, 4.0, 1.0, "How many times light bounces between surfaces. Needs a re-bake"],
 	["bounce", "Bounce strength", 0.0, 1.5, 0.05, "How much light surfaces pass on (x their colour). Needs a re-bake"],
 	["samples", "Quality (rays)", 8.0, 256.0, 8.0, "Sky rays per vertex: more is smoother and slower. Needs a re-bake"],
+	["lightmap", "Lightmap (cm a texel)", 0.0, 50.0, 1.0, "0 = light in the vertices. Above 0 the export bakes light into textures the way the game's own stages do: clean, straight shadows and no bleeding under walls, at about 8 cm a texel. Detail isn't used then. Adds up to 23 MB of textures; if it doesn't fit, the texels get bigger (the export log says). This view still shows the vertex bake. New: not yet tested in game"],
 	["detail", "Detail (+% vertices)", 0.0, 400.0, 5.0, "Puts vertices along the sun's shadow lines and splits triangles where the other light changes sharply (doorways, wall feet), up to this many more vertices: sharper light, bigger stage model, slower bake (the cost shows below). Needs a re-bake"]]
 # detail cost (lp2bake.py), measured on Battlegrounds: the built stage model is about STAGE_VERTEX_BYTES per vertex
 # (the preview has more vertices than the stage: count from the model's bytes) and each split vertex adds
@@ -529,7 +530,7 @@ func _unsplit_stats() -> Dictionary:
 func detail_estimate() -> Dictionary:
 	# what the detail setting will add when the stage is baked (lp2bake.py splits up to its vertices x detail %):
 	# {} with the LP1 lightmap or no detail; else vertices / added (the stage's, at most), bytes (stage model), ram (bake)
-	if main.project_dir == "" or _bake("source") != "bake" or float(_bake("detail")) <= 0:
+	if main.project_dir == "" or _bake("source") != "bake" or float(_bake("detail")) <= 0 or float(_bake("lightmap")) > 0:
 		return {}
 	var st := _unsplit_stats()
 	if st.is_empty():
@@ -732,6 +733,141 @@ func update_marker(n: Node3D) -> void:
 	l.light_energy = float(d.get("brightness", 2.0))
 	l.shadow_enabled = false
 	n.add_child(l)
+	_update_ranges(n)
+
+# ---- the range spheres: a selected light's "start" (inner) and "end" (outer) distances as wire spheres; Ctrl+drag one to size it
+
+const RANGE_KEYS := ["start", "end"]
+const RANGE_DEFAULT := {"start": 100.0, "end": 1000.0}
+const RANGE_ALPHA := {"start": 0.55, "end": 0.95}
+const RANGE_MAX := 50000.0   # cm
+const RANGE_SEGMENTS := 64
+const RANGE_PICK_PX := 9.0
+var face := {}               # the sphere being dragged: node, key, press, start (cm)
+var _ring_mesh: ArrayMesh    # unit circles round X, Y and Z
+var _rim_mesh: ArrayMesh     # one unit circle, turned to the camera: the sphere's outline
+
+func _circle(axis: int) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	for i in RANGE_SEGMENTS:
+		for k in 2:
+			var a := TAU * (i + k) / RANGE_SEGMENTS
+			var p := Vector3(cos(a), sin(a), 0)
+			out.append(p if axis == 2 else Vector3(p.x, 0, p.y) if axis == 1 else Vector3(0, p.x, p.y))
+	return out
+
+func _line_mesh(axes: Array) -> ArrayMesh:
+	var v := PackedVector3Array()
+	for a in axes:
+		v.append_array(_circle(a))
+	var arr := []
+	arr.resize(Mesh.ARRAY_MAX)
+	arr[Mesh.ARRAY_VERTEX] = v
+	var m := ArrayMesh.new()
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_LINES, arr)
+	return m
+
+func _range_node(n: Node3D, key: String) -> Node3D:
+	var r := n.get_node_or_null("range_" + key) as Node3D
+	if r:
+		return r
+	if _ring_mesh == null:
+		_ring_mesh = _line_mesh([0, 1, 2])
+		_rim_mesh = _line_mesh([2])
+	r = Node3D.new()
+	r.name = "range_" + key
+	for rim in [false, true]:
+		var mi := MeshInstance3D.new()
+		mi.mesh = _rim_mesh if rim else _ring_mesh
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mi.extra_cull_margin = 100000.0   # the unit mesh is scaled up; a camera inside the sphere still draws it
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.no_depth_test = true
+		mat.render_priority = 2
+		if rim:
+			mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+			mat.billboard_keep_scale = true
+		mi.material_override = mat
+		r.add_child(mi)
+	n.add_child(r)
+	return r
+
+func _update_ranges(n: Node3D) -> void:
+	var d: Dictionary = n.get_meta("data")
+	var on: bool = main.selection.has(n)
+	for key in RANGE_KEYS:
+		var r := _range_node(n, key)
+		r.visible = on
+		var radius := maxf(float(d.get(key, RANGE_DEFAULT[key])) * main.CM, 0.001)
+		r.scale = Vector3.ONE * radius
+		var c := _colour(d)
+		c.a = RANGE_ALPHA[key]
+		for mi in r.get_children():
+			(mi.material_override as StandardMaterial3D).albedo_color = c
+
+func face_hit(mp: Vector2) -> Dictionary:
+	# the selected light's sphere whose lines pass under the mouse: a ring, or the outline (the nearer one)
+	var best := {}
+	var cam: Camera3D = main.camera
+	for n in _selected_lights():
+		var c: Vector3 = n.global_position
+		var d: Dictionary = n.get_meta("data")
+		for key in RANGE_KEYS:
+			var radius: float = float(d.get(key, RANGE_DEFAULT[key])) * main.CM
+			if radius <= 0.0:
+				continue
+			var off := RANGE_PICK_PX + 1.0
+			if not cam.is_position_behind(c):
+				var at := cam.unproject_position(c)
+				off = absf(at.distance_to(mp) - at.distance_to(cam.unproject_position(c + cam.global_transform.basis.x * radius)))
+			for axis in 3:
+				var pts := _circle(axis)
+				for i in range(0, pts.size(), 2):
+					var a: Vector3 = c + pts[i] * radius
+					var b: Vector3 = c + pts[i + 1] * radius
+					if cam.is_position_behind(a) or cam.is_position_behind(b):
+						continue
+					off = minf(off, Geometry2D.get_closest_point_to_segment(mp, cam.unproject_position(a), cam.unproject_position(b)).distance_to(mp))
+			if off < RANGE_PICK_PX and (best.is_empty() or off < best["off"]):
+				best = {"node": n, "key": key, "off": off, "press": mp, "t": cam.global_position.distance_to(c)}
+	return best
+
+func _from_centre(n: Node3D, mp: Vector2) -> float:
+	# how far the mouse's ray passes from the light, cm
+	var o: Vector3 = main.camera.project_ray_origin(mp)
+	var dir: Vector3 = main.camera.project_ray_normal(mp)
+	var w: Vector3 = n.global_position - o
+	return (w - dir * maxf(w.dot(dir), 0.0)).length() / main.CM
+
+func begin_face(hit: Dictionary, _extrude := false) -> void:
+	var d: Dictionary = hit["node"].get_meta("data")
+	face = hit.duplicate()
+	face["start"] = float(d.get(hit["key"], RANGE_DEFAULT[hit["key"]]))
+	face["from"] = _from_centre(hit["node"], hit["press"])
+
+func drag_face(mp: Vector2, snap: bool) -> void:
+	var n: Node3D = face["node"]
+	var d: Dictionary = n.get_meta("data")
+	var v: float = face["start"] + _from_centre(n, mp) - face["from"]
+	if snap:
+		v = snappedf(v, 50.0)
+	if face["key"] == "start":   # the inner one stays inside the outer one
+		v = clampf(v, 0.0, float(d.get("end", RANGE_DEFAULT["end"])))
+	else:
+		v = clampf(v, maxf(10.0, float(d.get("start", 0.0))), RANGE_MAX)
+	d[face["key"]] = snappedf(v, 1.0)
+	update_marker(n)
+	if visible:
+		_show_light()
+	main.set_status("%s: %d cm" % ["Inner range" if face["key"] == "start" else "Outer range", int(d[face["key"]])])
+	var item: Variant = n.get_meta("item") if n.has_meta("item") else null
+	if item != null and is_instance_valid(item):
+		(item as TreeItem).set_text(0, label(d))
+
+func end_face() -> void:
+	face = {}
 
 func _colour(d: Dictionary) -> Color:
 	var c: Array = d.get("colour", [1, 1, 1])
@@ -856,5 +992,8 @@ func _popup_act(f: Callable) -> void:
 	f.call()
 
 func selection_changed() -> void:
+	for n in main.markers_root.get_children():
+		if is_light(n):
+			_update_ranges(n)
 	if visible:
 		_show_light()

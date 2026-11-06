@@ -26,7 +26,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 DEFAULTS = dict(source="lp1", sun=0.4, sky=1.0, sky_tint=[1.0, 1.0, 1.0], lights=1.0, glow=1.0, exposure=0.0,
-                min_light=0.01, bounce=1.0, bounces=2, samples=64, detail=0, emissive={})
+                min_light=0.01, bounce=1.0, bounces=2, samples=64, detail=0, lightmap=0, emissive={})
 LIVE = ("sun", "sky", "sky_tint", "lights", "glow", "exposure", "min_light")   # applied to the stored components
 STOCK_SUN, STOCK_SKY, STOCK_GROUND = [2.43] * 3, [0.152] * 3, [0.106] * 3
 CALIBRATION = 0.48    # linear light per unit of irradiance (fitted: Battlegrounds' default bake's median = LP1's)
@@ -952,6 +952,15 @@ def bake_stage(model, folder, p, log=print, dynamic=None):
     key_full = _key(model_bytes, albedo.tobytes(), s, lights, {k: env.get(k) for k in ("sun", "sun_colour", "sky_colour", "ground_colour")},
                     ray_inputs["dyn"])
     full = os.path.join(cache_dir(), key_full + ".rModel")
+    if float(s.get("lightmap") or 0) > 0:   # into textures instead of the vertices (lp2lightmap.py)
+        import lp2lightmap
+        T = np.concatenate(Ts)
+        out = os.path.dirname(model)
+        stem = os.path.splitext(os.path.basename(model))[0]
+        tex_dir = S["textures"][0].rsplit("\\", 1)[0] if S["textures"] else ""
+        names, mats, meshes, pages = lp2lightmap.bake(attrs, T, S, albedo, emission_table(names, s), env, lights, s, out, stem, tex_dir, folder, p, log)
+        lp2stage.write_stage(model, names, mats, meshes)
+        return
     if os.path.exists(full):
         open(model, "wb").write(open(full, "rb").read())
         log("  baked light: unchanged, from the cache")
