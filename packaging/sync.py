@@ -9,7 +9,7 @@ tools/ gets only what the editor needs: the scripts it runs (ENTRY) and everythi
 import argparse, os, re, shutil, sys
 
 ENTRY = ["runtool", "lp2col", "lp2colview", "lp2library", "lp2light", "lp2mapc", "lp2mesh", "lp2pieces",
-         "lp2preview", "lp2sky", "lp2project", "lp2convert", "lp2navmap", "lp2radar"]
+         "lp2preview", "lp2sky", "lp2project", "lp2convert", "lp2navmap", "lp2radar", "lp2mode"]
 EDITOR_FILES = re.compile(r".*\.(gd|gdshader|uid|tscn|godot|svg|png)$|^README\.md$|^run\.sh$|^export_presets\.cfg$")
 
 
