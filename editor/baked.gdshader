@@ -13,6 +13,7 @@ render_mode cull_disabled, ambient_light_disabled, specular_disabled;
 uniform bool cull_back = false;   // back faces dropped (the preview's triangles are wound to their normals)
 uniform sampler2D albedo : source_color, filter_linear_mipmap, repeat_enable;
 uniform bool has_texture = false;
+uniform bool cutout = false;   // alpha-tested (the game cuts out texels under half alpha)
 uniform float bake_scale = 4.0;
 uniform bool use_bake = false;
 uniform vec3 sun_k = vec3(1.0);      // sun colour x strength
@@ -37,6 +38,9 @@ void vertex() {
 
 void fragment() {
 	if (cull_back && !FRONT_FACING) {
+		discard;
+	}
+	if (cutout && has_texture && texture(albedo, UV).a < 0.5) {
 		discard;
 	}
 	vec3 tex = has_texture ? texture(albedo, UV).rgb : vec3(0.7);

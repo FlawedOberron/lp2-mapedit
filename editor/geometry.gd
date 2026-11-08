@@ -271,6 +271,7 @@ func _make_materials(prev: String) -> void:
 			lit.set_shader_parameter("albedo", tex)
 			lit.set_shader_parameter("has_texture", true)
 		lit.set_shader_parameter("cull_back", oriented)
+		lit.set_shader_parameter("cutout", bool(m.get("cutout", false)))
 		materials_lit.append(lit)
 		var sm := ShaderMaterial.new()
 		sm.shader = preload("res://baked.gdshader")
@@ -279,6 +280,7 @@ func _make_materials(prev: String) -> void:
 			sm.set_shader_parameter("albedo", tex)
 			sm.set_shader_parameter("has_texture", true)
 		sm.set_shader_parameter("cull_back", oriented)
+		sm.set_shader_parameter("cutout", bool(m.get("cutout", false)))
 		materials_baked.append(sm)
 
 func set_bake_params(p: Dictionary) -> void:

@@ -16,6 +16,9 @@ var imp_collision: OptionButton
 var imp_scale: SpinBox
 var imp_unwrap: SpinBox
 var imp_blockout: CheckButton
+var window_paint: Button    # Paint windows: clicks on placed imported meshes mark flat regions as window (main routes them)
+var _window_queue := {}     # import name -> ["x,y,z,nx,ny,nz[,1]", ...] waiting for the next rebuild
+var _window_timer: Timer
 var _showing := false       # _show_import filling the fields (no rebuild)
 var imp_slots: GridContainer
 var imp_split: CheckBox
@@ -121,6 +124,18 @@ func setup(m: Node, t: Node) -> void:
 	imp_blockout.tooltip_text = "Colour the mesh by facing instead of its materials: walkable floors orange, walls grey-white, ceilings dark grey (1 m grids; the project materials blockout_floor / _wall / _ceiling, recolour them like any other). Off: the file's materials again. Rebuilds it"
 	imp_blockout.toggled.connect(func(_on): if not _showing: apply_import())
 	urow.add_child(imp_blockout)
+	window_paint = Button.new()
+	window_paint.text = "Paint windows"
+	window_paint.toggle_mode = true
+	window_paint.tooltip_text = "Click a face of any placed imported mesh: its flat region becomes a window (a see-through blue grid, cut out in game, no shadow in the light bake). Shift+click unpaints. Turns Blockout on for that mesh; each mesh rebuilds a moment after the last click. Esc or this button stops"
+	window_paint.toggled.connect(func(on): main.set_status("Paint windows: click faces of placed meshes (Shift: unpaint, Esc: stop)" if on else "Stopped painting windows"))
+	urow.add_child(window_paint)
+	main._button(urow, "Clear windows", clear_windows).tooltip_text = "Unpaint every window of the selected mesh (window / glass materials from the file stay windows)"
+	_window_timer = Timer.new()
+	_window_timer.one_shot = true
+	_window_timer.wait_time = 0.8
+	_window_timer.timeout.connect(_flush_windows)
+	add_child(_window_timer)
 	v.add_child(urow)
 	v.add_child(main._label("Materials (the file's material -> a project material):"))
 	imp_slots = GridContainer.new()
@@ -452,8 +467,8 @@ func _slug(s: String) -> String:
 		out += ch if (ch >= "a" and ch <= "z") or (ch >= "0" and ch <= "9") or ch == "_" else "_"
 	while out.contains("__"):
 		out = out.replace("__", "_")
-	out = out.strip_edges().trim_prefix("_").trim_suffix("_")
-	return (out if out != "" else "mesh").substr(0, 32)
+	out = out.strip_edges().trim_prefix("_").substr(0, 32).trim_suffix("_")   # cut first, as slug() does now
+	return out if out != "" else "mesh"
 
 func apply_import() -> void:
 	var a := _selected_import()
@@ -465,6 +480,72 @@ func apply_import() -> void:
 		if o is OptionButton and o.selected >= 0:
 			args += ["--mat", "%s=%s" % [o.get_meta("slot"), o.get_item_text(o.selected)]]
 	_rebuild(a, args)
+
+func painting_windows() -> bool:
+	return window_paint != null and window_paint.button_pressed
+
+func handle_paint(e: InputEvent) -> bool:
+	# main._unhandled_input while Paint windows is on: left clicks paint, Esc stops; the camera keeps the rest
+	if e is InputEventKey and e.pressed and e.keycode == KEY_ESCAPE:
+		window_paint.button_pressed = false
+		return true
+	if not (e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT):
+		return false
+	var hit: Dictionary = main._mouse_ray(e.position, 1 << (main.LAYER_STAGE - 1))
+	if hit.is_empty():
+		main.set_status("Nothing there: click a placed imported mesh")
+		return true
+	var p: Node3D = main.geometry.piece_of(hit["collider"])
+	if p == null or not p.has_meta("tree"):
+		main.set_status("Not an imported mesh")
+		return true
+	var pos: Vector3 = hit["position"]
+	var best: Dictionary = {}
+	var best_d := INF
+	for m in main.geometry.members_of(p.get_meta("tree")):
+		if not str(m.get("map", "")).begins_with("@project/imports/"):
+			continue
+		var xf: Transform3D = p.global_transform * (m["L"] as Transform3D)
+		var lp: Vector3 = xf.affine_inverse() * pos
+		var g: Node = main.geometry.src(m)
+		var d := 0.0
+		if g != null:
+			var ab: Array = g.data["atom_box"]
+			var k: int = int(m["atom"]) * 6
+			var lo := Vector3(ab[k], ab[k + 1], ab[k + 2])
+			var hi := Vector3(ab[k + 3], ab[k + 4], ab[k + 5])
+			d = (lp - lp.clamp(lo, hi)).length()
+		if d < best_d:
+			best_d = d
+			best = {"m": m, "xf": xf, "lp": lp}
+	if best.is_empty():
+		main.set_status("Only imported meshes (Mesh builder) can have windows painted")
+		return true
+	var xf: Transform3D = best["xf"]
+	var n: Vector3 = (xf.basis.transposed() * (hit["normal"] as Vector3)).normalized()
+	var lp: Vector3 = best["lp"]
+	var name: String = str(best["m"]["map"]).get_file()
+	var w := "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f" % [lp.x, lp.y, lp.z, n.x, n.y, n.z] + (",1" if e.shift_pressed else "")
+	if not _window_queue.has(name):
+		_window_queue[name] = []
+	_window_queue[name].append(w)
+	main.set_status("%s a window on %s..." % ["Unpainting" if e.shift_pressed else "Painting", name])
+	_window_timer.start()
+	return true
+
+func _flush_windows() -> void:
+	for name in _window_queue:
+		var args := ["rebuild", "--game", main.game, _proj(), name]
+		for w in _window_queue[name]:
+			args += ["--window", w]
+		_rebuild({"map": "@project/imports/" + name, "name": name}, args)
+	_window_queue = {}
+
+func clear_windows() -> void:
+	var a := _selected_import()
+	if a.is_empty():
+		return
+	_rebuild(a, ["rebuild", "--game", main.game, _proj(), a["name"], "--clear-windows"])
 
 func lazy_unwrap() -> void:
 	if imp_unwrap.value <= 0.0:

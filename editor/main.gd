@@ -137,6 +137,7 @@ var fog_win: Window
 var nav_win: Window     # navmesh.gd
 var nav_test := false   # --navmesh: the window open and the navmesh shown in the screenshot
 var scripts_win: Window   # scripts.gd: visual scripting (K)
+var modes_win: Window     # modes.gd: game mode scripting (J), its own .lp2mode file
 var settings_win: Window
 var new_win: Window
 var placer: Window   # place.gd: click-and-drag placing of spawns, weapons, VS
@@ -423,7 +424,14 @@ func _build_ui() -> void:
 	var bars := VBoxContainer.new()
 	root.add_child(_panel(bars))
 	var bar := _scroll_row(bars)
-	_button(bar, "New map...", func(): new_win.open()).tooltip_text = "A new map: empty (a flat ground to build on) or imported from one of Lost Planet 1's or Lost Planet 2's maps"
+	var new_menu := MenuButton.new()
+	new_menu.text = "New"
+	new_menu.flat = false
+	new_menu.tooltip_text = "A new map (empty, or imported from one of Lost Planet 1's or Lost Planet 2's maps) or a new game mode"
+	new_menu.get_popup().add_item("New map...", 0)
+	new_menu.get_popup().add_item("New game mode", 1)
+	new_menu.get_popup().id_pressed.connect(func(i): new_map() if i == 0 else new_game_mode())
+	bar.add_child(new_menu)
 	_button(bar, "Open...", _on_open)
 	_button(bar, "Save", save_project)
 	_button(bar, "Save as...", _on_save_as)
@@ -436,6 +444,7 @@ func _build_ui() -> void:
 	_button(bar, "Fog & weather (H)", toggle_fog).tooltip_text = "Distance fog, low-lying height fog, rain / snow / ash and no-weather boxes"
 	_button(bar, "Navmesh (N)", func(): nav_win.toggle()).tooltip_text = "Build the bots' navigation mesh (playable area only) and set the radar floors"
 	_button(bar, "Scripts (K)", toggle_scripts).tooltip_text = "Visual scripting: events (volumes entered, timers) switch volumes' effects during the match (experimental, xlive mod)"
+	_button(bar, "Game Mode (J)", toggle_modes).tooltip_text = "Game mode scripting: a mode as its own file (Modes folder), with lobby settings and the markers / volumes a map needs for it; saving compiles it for the game (mode.txt in the game folder picks the one to play)"
 	_button(bar, "Place (T)", toggle_placer).tooltip_text = "Place spawn points, weapons, VS and volumes: click the map to put one down, drag to aim it (volumes: drag out the floor)"
 	_button(bar, "Settings", toggle_settings).tooltip_text = "The game folders and the asset library folder"
 	status = _label("No project open")
@@ -912,6 +921,10 @@ void fragment() {
 	scripts_win.set_script(load("res://scripts.gd"))
 	add_child(scripts_win)
 	scripts_win.setup(self)
+	modes_win = Window.new()
+	modes_win.set_script(load("res://modes.gd"))
+	add_child(modes_win)
+	modes_win.setup(self)
 	placer = Window.new()
 	placer.set_script(load("res://place.gd"))
 	add_child(placer)
@@ -2366,6 +2379,34 @@ func _screenshot() -> void:
 		print("script-test: after redo ", (project.get("scripts", {}) as Dictionary).get("nodes", []).size(), " nodes, links ", project["scripts"]["links"].size())
 		await get_tree().create_timer(0.5).timeout
 		scripts_win.get_texture().get_image().save_png(screenshot_path.get_basename() + "-scripts.png")
+	if OS.get_cmdline_user_args().has("--mode-test"):   # the Game Mode window: an Arena graph, scan, check, save
+		modes_win.new_mode()
+		modes_win.doc["name"] = "Arena"
+		modes_win._load_fields()
+		var at := [[20, 20], [300, 20], [580, 20], [860, 20], [20, 300], [300, 300], [580, 300], [860, 300]]
+		var kinds := ["matchstart", "findmarkers", "queue", "spawnplayer", "ondeath", "eliminate", "queue", "showtext"]
+		for i in kinds.size():
+			modes_win._add_at = Vector2(at[i][0], at[i][1])
+			modes_win.add_node(kinds[i])
+		var ns: Array = modes_win.data()["nodes"]
+		ns[1]["text"] = "arena_spawn_*"
+		modes_win._on_connect(ns[0]["id"], 0, ns[1]["id"], 0)
+		modes_win._on_connect(ns[1]["id"], 0, ns[2]["id"], 2)   # found -> pop
+		modes_win._on_connect(ns[2]["id"], 0, ns[3]["id"], 0)   # then -> spawn
+		modes_win._on_connect(ns[4]["id"], 0, ns[5]["id"], 0)
+		modes_win._on_connect(ns[5]["id"], 0, ns[6]["id"], 0)   # -> push
+		modes_win._on_connect(ns[6]["id"], 0, ns[7]["id"], 0)
+		(modes_win.doc["settings"] as Array).append({"var": "fighters", "label": "Fighters at once", "kind": "number", "default": 2, "min": 2, "max": 8, "step": 1})
+		modes_win.refresh()
+		modes_win._load_fields()
+		modes_win.scan_requirements()
+		modes_win.check_against_map()
+		print("mode-test: requires ", JSON.stringify(modes_win.doc["requires"]), " | ", modes_win.req_result.text.replace("\n", " / "))
+		print("mode-test: fonts ", modes_win.font_names())
+		modes_win.save_mode(screenshot_path.get_basename() + "-Arena.lp2mode")
+		modes_win.popup()
+		await get_tree().create_timer(0.8).timeout
+		modes_win.get_texture().get_image().save_png(screenshot_path.get_basename() + "-modes.png")
 	if OS.get_cmdline_user_args().has("--set-test"):   # Place set of an imported split set (imports/yard: lp2mesh --split)
 		mesh_builder.refresh()
 		mesh_builder.select_key("imp_yard_crate")
@@ -3694,6 +3735,28 @@ func toggle_fog() -> void:
 	else:
 		fog_win.popup()
 
+func new_map() -> void:
+	# a map's windows: the game mode one steps aside
+	modes_win.hide()
+	new_win.open()
+
+func new_game_mode() -> void:
+	# a fresh mode document in its window; the map-only windows (map scripts, navmesh, placing) step aside
+	if modes_win.dirty:
+		log_line("Game mode \"%s\" had unsaved changes: they were dropped for the new one." % modes_win.doc.get("name", ""))
+	for w in [scripts_win, nav_win, placer]:
+		if w and w.visible:
+			w.hide()
+	modes_win.new_mode()
+	modes_win.popup()
+
+func toggle_modes() -> void:
+	if modes_win.visible:
+		modes_win.hide()
+	else:
+		modes_win.refresh()
+		modes_win.popup()
+
 func toggle_scripts() -> void:
 	if scripts_win.visible:
 		scripts_win.hide()
@@ -3921,6 +3984,9 @@ func _unhandled_input(e: InputEvent) -> void:
 	if terrain.editing() and terrain.handle_input(e):   # terrain edit mode: its brushes and keys; the level is locked
 		get_viewport().set_input_as_handled()
 		return
+	if mesh_builder and mesh_builder.painting_windows() and mesh_builder.handle_paint(e):   # Mesh builder's Paint windows
+		get_viewport().set_input_as_handled()
+		return
 	if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_RIGHT and e.pressed and e.ctrl_pressed and e.shift_pressed:
 		var bh: Dictionary = volumes.face_hit(e.position)   # Ctrl+Shift+right click: delete the volume box under the mouse
 		if not bh.is_empty() and volumes.sub_boxes(bh["node"].get_meta("data")).size() > 1:
@@ -4073,6 +4139,8 @@ func _unhandled_input(e: InputEvent) -> void:
 				nav_win.toggle()
 			KEY_K:
 				toggle_scripts()
+			KEY_J:
+				toggle_modes()
 			KEY_I:
 				toggle_info()
 			KEY_P:

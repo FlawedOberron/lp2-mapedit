@@ -87,12 +87,16 @@ const TYPES := {
 		"hint": "Passes a pulse on at most once per its seconds (the rest go to blocked); reset lets the next one through"},
 	"loop": {"title": "Loop", "ins": ["in"], "outs": ["each", "done"], "props": {"var": "i", "a": "1", "b": "5"},
 		"hint": "Fires each with the variable at From, From + 1 ... To (counting down when To is lower), then done"},
+	"zoneoutline": {"title": "Zone outline", "ins": ["show", "hide"], "outs": ["then"], "props": {"text": "koth_*", "colour": "ffcc33", "a": "300", "seconds": 0.0},
+		"hint": "Shows (or hides) a fence over the borders of every bot zone whose name or tag matches (* and ? wildcards), Height cm tall, in the colour, for everyone; Seconds 0: until hidden. Experimental: untested in game"},
+	"onmodeevent": {"title": "On mode event", "ins": [], "outs": ["then"], "props": {"text": "my_event", "player": "who"},
+		"hint": "Fires when the running game mode's Fire map event sends this name (case ignored); Player: who it was sent for (nobody: none). Lets a map react to custom modes (doors, lights, zone fences...)"},
 	"log": {"title": "Log", "ins": ["in"], "outs": ["then"], "props": {"text": "hello"},
 		"hint": "Writes its text to the xlive log (for testing a script); {name} shows a variable's value"},
 }
-const ORDER := ["start", "enter", "timer", "delay", "flipflop", "counter", "if", "compare", "switch", "sequence", "gate", "once", "branch", "chance", "cooldown", "loop", "set", "random", "math",
+const ORDER := ["start", "enter", "timer", "onmodeevent", "delay", "flipflop", "counter", "if", "compare", "switch", "sequence", "gate", "once", "branch", "chance", "cooldown", "loop", "set", "random", "math",
 	"findmarkers", "getmarker", "spawn", "teleport", "getpos", "vector", "players", "list", "listremove", "listget", "listcount", "foreach", "playercheck", "playerget", "playeract",
-	"volume", "setvalue", "log"]
+	"volume", "setvalue", "zoneoutline", "log"]
 # player conditions / values / actions (scripts.cpp ScriptCheck, ScriptStat, ScriptAction)
 const CHECKS := [["gone", "Gone (left, nobody)"], ["dead", "Dead"], ["gone_or_dead", "Gone or dead"], ["alive", "Alive"],
 	["health_below", "Health % below"], ["teng_below", "T-Eng below"]]
@@ -131,6 +135,11 @@ var picking := false       # the eyedropper is on: main.gd sends the next click 
 var pick_button: Button
 var pick_menu: PopupMenu   # what to add for a picked volume
 var _picked: Node3D
+# The node set this window offers (modes.gd: the Game Mode window adds its own), the toolbar row and the column under it
+var types: Dictionary = TYPES
+var order: Array = ORDER
+var toolbar: HBoxContainer
+var column: VBoxContainer
 
 func _init() -> void:
 	title = "Scripts"
@@ -149,15 +158,17 @@ func setup(m: Node) -> void:
 	var v := VBoxContainer.new()
 	bg.add_child(v)
 	var row := HBoxContainer.new()
+	toolbar = row
+	column = v
 	var mb := MenuButton.new()
 	mb.text = "Add node"
 	mb.flat = false
-	for i in ORDER.size():
-		mb.get_popup().add_item(TYPES[ORDER[i]]["title"], i)
-		mb.get_popup().set_item_tooltip(i, TYPES[ORDER[i]]["hint"])
+	for i in order.size():
+		mb.get_popup().add_item(types[order[i]]["title"], i)
+		mb.get_popup().set_item_tooltip(i, types[order[i]]["hint"])
 	mb.get_popup().id_pressed.connect(func(i):
 		_add_at = (graph.scroll_offset + graph.size / 2) / graph.zoom
-		add_node(ORDER[i]))
+		add_node(order[i]))
 	row.add_child(mb)
 	pick_button = Button.new()
 	pick_button.text = "Pick from level"
@@ -182,9 +193,9 @@ func setup(m: Node) -> void:
 	graph.popup_request.connect(_on_popup)
 	v.add_child(graph)
 	add_menu = PopupMenu.new()
-	for i in ORDER.size():
-		add_menu.add_item(TYPES[ORDER[i]]["title"], i)
-	add_menu.id_pressed.connect(func(i): add_node(ORDER[i]))
+	for i in order.size():
+		add_menu.add_item(types[order[i]]["title"], i)
+	add_menu.id_pressed.connect(func(i): add_node(order[i]))
 	add_child(add_menu)
 	pick_menu = PopupMenu.new()
 	for t in ["getmarker", "enter", "volume", "setvalue"]:
@@ -230,7 +241,7 @@ func _add_picked(t: String) -> void:
 		g.queue_free()
 		_make(data()["nodes"][-1])
 	grab_focus()
-	main.log_line("Script: added %s for %s." % [TYPES[t]["title"], main.object_tag(n) if main.object_tag(n) != "" else "the volume"])
+	main.log_line("Script: added %s for %s." % [types[t]["title"], main.object_tag(n) if main.object_tag(n) != "" else "the volume"])
 
 # ---------------------------------------------------------------- data
 
@@ -251,13 +262,19 @@ func _node_data(id: String) -> Dictionary:
 	return {}
 
 func _kind(t: String) -> Color:
-	if t in ["start", "enter", "timer"]:
+	if t in ["start", "enter", "timer", "onmodeevent"]:
 		return EVENT_COLOUR
-	if t in ["volume", "setvalue", "log", "playeract", "spawn", "teleport"]:
+	if t in ["volume", "setvalue", "zoneoutline", "log", "playeract", "spawn", "teleport"]:
 		return ACTION_COLOUR
 	if t in ["set", "random", "math", "getpos", "vector", "findmarkers", "getmarker", "players", "list", "listremove", "listget", "listcount", "playerget"]:
 		return DATA_COLOUR
 	return FLOW_COLOUR
+
+func _undo(key: String) -> void:
+	main._push_undo(key)
+
+func _no_doc() -> bool:
+	return main.project.is_empty()
 
 func refresh() -> void:
 	# the graph from the project (open, undo)
@@ -267,7 +284,7 @@ func refresh() -> void:
 		if c is GraphNode:
 			graph.remove_child(c)
 			c.queue_free()
-	if main.project.is_empty():
+	if _no_doc():
 		_updating = false
 		return
 	for n in data()["nodes"]:
@@ -282,18 +299,18 @@ func refresh() -> void:
 
 func _port_index(id: String, port: String, input: bool) -> int:
 	var n := _node_data(id)
-	if n.is_empty() or not TYPES.has(n["type"]):
+	if n.is_empty() or not types.has(n["type"]):
 		return -1
-	return (TYPES[n["type"]]["ins" if input else "outs"] as Array).find(port)
+	return (types[n["type"]]["ins" if input else "outs"] as Array).find(port)
 
 func add_node(t: String) -> void:
-	if main.project.is_empty():
+	if _no_doc():
 		return
-	main._push_undo("")
+	_undo("")
 	_uid += 1
 	var n := {"id": "n%d" % _uid, "type": t, "pos": [snappedf(_add_at.x, 10), snappedf(_add_at.y, 10)]}
-	for k in TYPES[t].get("props", {}):
-		n[k] = TYPES[t]["props"][k]
+	for k in types[t].get("props", {}):
+		n[k] = types[t]["props"][k]
 	if t in ["enter", "volume", "setvalue"]:
 		var sel: Array = main.selection.filter(func(x): return is_instance_valid(x) and main.volumes.is_volume(x))
 		if sel.size() == 1:
@@ -303,7 +320,7 @@ func add_node(t: String) -> void:
 
 func _make(n: Dictionary) -> void:
 	var t: String = n["type"]
-	var spec: Dictionary = TYPES.get(t, {})
+	var spec: Dictionary = types.get(t, {})
 	if spec.is_empty():
 		return
 	var g := GraphNode.new()
@@ -357,7 +374,7 @@ func _prop_control(n: Dictionary, k: String) -> Control:
 			o.pressed.connect(func(): _refill_volumes(o, n))
 			o.item_selected.connect(func(i):
 				var d: Variant = o.get_item_metadata(i)
-				main._push_undo("")
+				_undo("")
 				n["volume"] = main.volumes.ensure_id(d) if d is Dictionary else "")
 			h.add_child(o)
 			var b := Button.new()
@@ -398,7 +415,7 @@ func _prop_control(n: Dictionary, k: String) -> Control:
 			e.focus_exited.connect(func(): apply.call(e.text))
 			h.add_child(e)
 		"seconds", "target", "max_seconds":
-			var caption: String = {"seconds": "Fade (s)" if n["type"] == "setvalue" else "Seconds", "target": "Outputs" if n["type"] == "branch" else "Target",
+			var caption: String = {"seconds": "Fade (s)" if n["type"] == "setvalue" else "For (s, 0: until hidden)" if n["type"] == "zoneoutline" else "Seconds", "target": "Outputs" if n["type"] == "branch" else "Target",
 				"max_seconds": "Up to (s)"}[k]
 			h.add_child(main._label(caption))
 			var s: SpinBox = main._spin(1.0 if k == "target" else 0.0, 6.0 if n["type"] == "branch" else 3600.0, 1.0 if k == "target" else 0.1)
@@ -407,6 +424,13 @@ func _prop_control(n: Dictionary, k: String) -> Control:
 				s.tooltip_text = "Above Seconds: a random time between the two each time; 0: always Seconds"
 			s.value_changed.connect(func(x): _set_prop(n, k, int(x) if k == "target" else x))
 			h.add_child(s)
+		"colour":
+			h.add_child(main._label("Colour"))
+			var c := ColorPickerButton.new()
+			c.custom_minimum_size = Vector2(60, 24)
+			c.color = Color.html(str(n.get("colour", "ffffff")))
+			c.color_changed.connect(func(x): _set_prop(n, "colour", x.to_html(false)))
+			h.add_child(c)
 		"a", "b":
 			var caption := "Value"
 			if n["type"] in ["random", "loop"]:
@@ -421,6 +445,8 @@ func _prop_control(n: Dictionary, k: String) -> Control:
 				caption = "Chance %"
 			elif n["type"] == "switch":
 				caption = "Value"
+			elif n["type"] == "zoneoutline":
+				caption = "Height (cm)"
 			elif n["type"] == "vector":
 				caption = k.to_upper()
 			elif n["type"] in ["math", "compare"]:
@@ -514,6 +540,10 @@ func _prop_control(n: Dictionary, k: String) -> Control:
 			h.add_child(c)
 		"var", "text", "player", "list", "marker", "vec":
 			var cap: String = {"var": "Variable", "text": "Text", "player": "Player", "list": "List", "marker": "Marker", "vec": "Vector"}[k]
+			if k == "text" and n["type"] == "zoneoutline":
+				cap = "Zone / tag"
+			if k == "text" and n["type"] in ["onmodeevent", "modeevent"]:
+				cap = "Event"
 			if k == "text" and n["type"] in ["findmarkers", "getmarker"]:
 				cap = "Name"
 			elif k == "player" and n["type"] in ["getmarker", "spawn"]:
@@ -579,7 +609,7 @@ func _refill_volumes(o: OptionButton, n: Dictionary) -> void:
 func _set_prop(n: Dictionary, k: String, v: Variant) -> void:
 	if _updating:
 		return
-	main._push_undo("script-" + n["id"] + k)
+	_undo("script-" + n["id"] + k)
 	n[k] = v
 
 func _on_connect(from: StringName, fp: int, to: StringName, tp: int) -> void:
@@ -587,24 +617,24 @@ func _on_connect(from: StringName, fp: int, to: StringName, tp: int) -> void:
 	var b := _node_data(str(to))
 	if a.is_empty() or b.is_empty():
 		return
-	main._push_undo("")
+	_undo("")
 	graph.connect_node(from, fp, to, tp)
-	data()["links"].append([str(from), TYPES[a["type"]]["outs"][fp], str(to), TYPES[b["type"]]["ins"][tp]])
+	data()["links"].append([str(from), types[a["type"]]["outs"][fp], str(to), types[b["type"]]["ins"][tp]])
 
 func _on_disconnect(from: StringName, fp: int, to: StringName, tp: int) -> void:
 	var a := _node_data(str(from))
 	var b := _node_data(str(to))
-	main._push_undo("")
+	_undo("")
 	graph.disconnect_node(from, fp, to, tp)
 	if a.is_empty() or b.is_empty():
 		return
-	var key := [str(from), TYPES[a["type"]]["outs"][fp], str(to), TYPES[b["type"]]["ins"][tp]]
+	var key := [str(from), types[a["type"]]["outs"][fp], str(to), types[b["type"]]["ins"][tp]]
 	data()["links"] = (data()["links"] as Array).filter(func(l): return l != key)
 
 func _on_delete(names: Array) -> void:
 	if names.is_empty():
 		return
-	main._push_undo("")
+	_undo("")
 	var ids: Array = names.map(func(x): return str(x))
 	data()["nodes"] = (data()["nodes"] as Array).filter(func(n): return not ids.has(n["id"]))
 	data()["links"] = (data()["links"] as Array).filter(func(l): return not ids.has(l[0]) and not ids.has(l[2]))
@@ -624,7 +654,7 @@ func problems() -> Array:
 			ids[d["id"]] = true
 	for n in data()["nodes"]:
 		if n["type"] in ["enter", "volume", "setvalue"] and not ids.has(n.get("volume", "")):
-			out.append("%s (%s) has no volume" % [TYPES[n["type"]]["title"], n["id"]])
+			out.append("%s (%s) has no volume" % [types[n["type"]]["title"], n["id"]])
 		elif n["type"] == "setvalue":
 			var d := _volume_of(n)
 			var st: Array = SETTINGS.filter(func(x): return x[0] == n.get("setting", ""))

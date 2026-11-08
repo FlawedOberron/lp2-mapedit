@@ -7,10 +7,14 @@ render_mode cull_disabled, specular_disabled;
 uniform bool cull_back = false;   // back faces dropped (the preview's triangles are wound to their normals)
 uniform sampler2D albedo : source_color, filter_linear_mipmap, repeat_enable;
 uniform bool has_texture = false;
+uniform bool cutout = false;   // alpha-tested (the game cuts out texels under half alpha)
 uniform float bake_scale = 2.0;
 
 void fragment() {
 	if (cull_back && !FRONT_FACING) {
+		discard;
+	}
+	if (cutout && has_texture && texture(albedo, UV).a < 0.5) {
 		discard;
 	}
 	ALBEDO = has_texture ? texture(albedo, UV).rgb : vec3(0.7);

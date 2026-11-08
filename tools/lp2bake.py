@@ -670,6 +670,22 @@ def preview_arrays(prev, name="geo"):
     return g, P, N, C, idx, vmat
 
 
+def no_shadow_textures(folder):
+    """colour map names (lower case) of the project materials marked "shadow": false (lp2mesh.py: um_<name>_bm)"""
+    import glob, re
+    out = set()
+    for f in glob.glob(os.path.join(folder, "materials", "*", "material.json")):
+        try:
+            m = json.load(open(f))
+        except (OSError, ValueError):
+            continue
+        if m.get("shadow") is False:
+            name = os.path.basename(os.path.dirname(f)).lower()
+            name = re.sub(r"_+", "_", re.sub(r"[^a-z0-9_]", "_", name)).strip("_")[:24]   # lp2mesh.slug
+            out.add(f"um_{name}_bm")
+    return out
+
+
 def placed_copies(folder, geo, lib, skip=(), log=print):
     """the placed copies of imported meshes and library pieces (geometry copies with a "map"), in world space:
     [dict(k (copy index), map, atom, m, P cm, N, U, C, T, vmat (into mats), mats [dict(name, albedo)])]"""
@@ -773,6 +789,13 @@ def bake_preview(folder, log=print, library=None):
             f"{sum(len(c['T']) for c in copies)} triangles")
     cat = lambda i: np.concatenate([q[i] for q in parts])
     P, N, U, C, T, vmat, group, occ = (cat(i) for i in range(8))
+    # see-through materials (the project's "shadow": false, e.g. lp2mesh's blockout_window) cast no shadows
+    clear = no_shadow_textures(folder)
+    if clear:
+        see = np.array([str(m["name"] or "").lower() in clear for m in mats])
+        if see.any():
+            occ = np.where(see[vmat], 0.0, occ)
+            log(f"bake: {int(see[vmat].sum())} vertices of see-through materials cast no shadows")
     albedo = np.stack([m["albedo"] if m["albedo"] is not None else np.full(3, 0.5) for m in mats]).astype(np.float64)
     attrs = dict(P=P.astype(np.float64), N=N.astype(np.float64), U=U, C=C, vmat=vmat, group=group, occ=occ)
     n_in = len(P)
