@@ -31,6 +31,12 @@ extends Node
 #                     inside (lp2navmap.py); later also the radar's extent
 #   "barrier": true   an invisible wall / roof: the box goes into the movement collision only (lp2mapc.py), so players
 #                     and VS are stopped while bullets (and, it's expected, the grapple, which aims with them) pass
+#   "spawn": {"team": 0 | 1 | -1, "order": n}
+#                     a spawn zone for team games' Spawning > Spawn Area: Zones (map.json "spawn_volumes", xlive mod
+#                     respawn.cpp): a team respawns at the free-for-all and team points inside the zones it owns. "team":
+#                     who owns it at the start (-1 nobody); "order": its place on the line from team A's side (low) to
+#                     team B's (high). Zones: Dynamic hands a zone to a team that holds it alone for 10 s, next (by order)
+#                     to one that team owns already
 #   "sound": {"reverb": key}  the game's reverb inside (a stock map's preset, REVERBS; lp2sound.py: the game's own
 #                     sound zones, no xlive mod); outside, the map's own (environment "sound": {"reverb"}, else the base map's)
 # A volume's "pos" is the centre of its floor (cm, like markers), "size" its extent (cm), "yaw" its turn about y
@@ -45,12 +51,15 @@ const COLOURS := {"kill": Color(0.95, 0.15, 0.15), "gravity": Color(0.25, 0.55, 
 	"weather": Color(0.3, 0.85, 0.8), "water": Color(0.15, 0.4, 0.95), "sound": Color(0.95, 0.7, 0.2),
 	"damage": Color(1.0, 0.45, 0.05), "marker": Color(1.0, 0.9, 0.2),
 	"oneway": Color(0.3, 1.0, 0.45), "limits": Color(0.85, 0.85, 0.95),
-	"barrier": Color(0.55, 0.75, 1.0), "force": Color(0.2, 0.95, 0.95), "none": Color(0.6, 0.6, 0.6)}
+	"barrier": Color(0.55, 0.75, 1.0), "force": Color(0.2, 0.95, 0.95), "spawn": Color(1.0, 0.4, 0.7), "none": Color(0.6, 0.6, 0.6)}
 const ADD := [["kill", "Kill volume (pit)"], ["gravity", "Gravity volume"], ["post", "Post-process volume (screen colour)"],
 	["weather", "Weather limiter volume (indoors)"], ["water", "Water volume (surface at its top)"],
 	["sound", "Sound volume (reverb zone)"], ["damage", "Damage volume (lava, fire)"],
 	["marker", "Script marker (a named point for scripts)"], ["oneway", "One-way wall (pass along its arrow only)"],
-	["force", "Force volume (lift, man cannon, wind)"], ["limits", "Map limits (marks the level's bounds)"], ["barrier", "Barrier (invisible wall / roof, no grapple)"]]
+	["force", "Force volume (lift, man cannon, wind)"], ["limits", "Map limits (marks the level's bounds)"], ["barrier", "Barrier (invisible wall / roof, no grapple)"],
+	["spawn", "Spawn zone (team games: Spawning > Zones)"]]
+const SPAWN := {"team": 0, "order": 0}   # a new one
+const SPAWN_TEAMS := [[0, "Team A"], [1, "Team B"], [-1, "Nobody (taken in Zones: Dynamic)"]]
 const ONEWAY := {"players": true, "vs": true, "bullets": false, "grenades": false, "akrid": false}   # a new one
 const ONEWAY_NAMES := [["players", "Players"], ["vs", "VS"], ["bullets", "Bullets"], ["grenades", "Grenades"], ["akrid", "Akrid"]]
 const FORCE := {"mode": "velocity", "vector": [0.0, 15.0, 0.0], "local": true, "players": true, "vs": true,
@@ -82,6 +91,10 @@ var damage_rows: Array = []  # the damage controls, shown while it's on
 var damage_spins := {}       # player / vs: % per second
 var damage_kills := {}       # player / vs: kill at once
 var marker_on: CheckBox
+var spawn_on: CheckBox
+var spawn_team: OptionButton
+var spawn_order: SpinBox
+var spawn_rows: Array = []   # the spawn zone controls, shown while it's on
 var oneway_on: CheckBox
 var oneway_flags := {}       # players / vs / bullets / grenades / akrid
 var oneway_rows: Array = []
@@ -183,6 +196,25 @@ func setup(m: Node, right: VBoxContainer) -> void:
 	marker_name.tooltip_text = "Letters, digits and _ (not case sensitive); several markers may share a prefix"
 	marker_name.text_changed.connect(func(_t): _on_changed())
 	g.add_child(marker_name)
+	spawn_on = _check(g, "Spawn zone", "Team games with Spawning > Spawn Area: Zones: the owning team respawns at the "
+		+ "free-for-all and team spawn points inside (xlive mod). Zones: Dynamic hands a zone to the other team once it "
+		+ "holds it alone for 10 s, next to a zone it owns already (by order)")
+	g.add_child(Control.new())
+	var stl: Label = main._label("  Owner")
+	spawn_team = OptionButton.new()
+	for t in SPAWN_TEAMS:
+		spawn_team.add_item(t[1])
+	spawn_team.tooltip_text = "Who spawns here at the start"
+	spawn_team.item_selected.connect(func(_i): _on_changed())
+	g.add_child(stl)
+	g.add_child(spawn_team)
+	var sol: Label = main._label("  Order")
+	spawn_order = main._spin(0.0, 99.0, 1.0)
+	spawn_order.tooltip_text = "Its place on the line from team A's side (low) to team B's (high); all the same = no line"
+	spawn_order.value_changed.connect(func(_v): _on_changed())
+	g.add_child(sol)
+	g.add_child(spawn_order)
+	spawn_rows += [stl, spawn_team, sol, spawn_order]
 	oneway_on = _check(g, "One-way wall", "What's ticked may cross the box only along its arrow (turn it with the yaw); "
 		+ "going back through, players, VS and akrid are held and bullets and grenades vanish (xlive mod)")
 	g.add_child(Control.new())
@@ -437,6 +469,8 @@ static func effects(d: Dictionary) -> Array:
 		out.append("damage")
 	if d.get("oneway"):
 		out.append("oneway")
+	if d.get("spawn"):
+		out.append("spawn")
 	if d.get("force"):
 		out.append("force")
 	if d.get("limits", false):
@@ -444,6 +478,9 @@ static func effects(d: Dictionary) -> Array:
 	if d.get("barrier", false):
 		out.append("barrier")
 	return out
+
+static func spawn_team_name(team: int) -> String:
+	return "team A" if team == 0 else "team B" if team == 1 else "nobody"
 
 static func reverb_name(key: String) -> String:
 	for r in REVERBS:
@@ -459,6 +496,7 @@ static func label(d: Dictionary) -> String:
 			else "reverb: " + reverb_name(str(d["sound"].get("reverb", ""))).get_slice(" (", 0) if e == "sound"
 			else "damage" if e == "damage"
 			else "one-way" if e == "oneway"
+			else "spawn zone (%s, order %d)" % [spawn_team_name(int(d["spawn"].get("team", -1))), int(d["spawn"].get("order", 0))] if e == "spawn"
 			else "force (%s)" % str(d["force"].get("mode", "continuous")) if e == "force"
 			else "map limits" if e == "limits"
 			else "barrier" if e == "barrier"
@@ -702,6 +740,9 @@ func place_volume(effect: String, at: Vector3) -> Node3D:
 		"force":
 			d["force"] = FORCE.duplicate(true)
 			d["size"] = [300.0, 600.0, 300.0]   # a lift shaft
+		"spawn":
+			d["spawn"] = SPAWN.duplicate()
+			d["size"] = [3000.0, 1000.0, 3000.0]
 		"oneway":
 			d["oneway"] = ONEWAY.duplicate()
 			d["size"] = [1000.0, 600.0, 100.0]   # a thin wall
@@ -782,6 +823,12 @@ func show_inspector(selection: Array) -> void:
 		damage_spins[k].editable = not damage_kills[k].button_pressed
 	for c in damage_rows:
 		c.visible = damage_on.button_pressed
+	var sz: Dictionary = d.get("spawn") if d.get("spawn") else {}
+	spawn_on.button_pressed = not sz.is_empty()
+	spawn_team.selected = maxi(0, SPAWN_TEAMS.map(func(t): return t[0]).find(int(sz.get("team", SPAWN["team"]))))
+	spawn_order.value = float(sz.get("order", SPAWN["order"]))
+	for c in spawn_rows:
+		c.visible = spawn_on.button_pressed
 	var ow: Dictionary = d.get("oneway") if d.get("oneway") else {}
 	oneway_on.button_pressed = not ow.is_empty()
 	for k in oneway_flags:
@@ -871,6 +918,10 @@ func _on_changed() -> void:
 		d["damage"] = dm
 	else:
 		d.erase("damage")
+	if spawn_on.button_pressed:
+		d["spawn"] = {"team": SPAWN_TEAMS[spawn_team.selected][0], "order": int(spawn_order.value)}
+	else:
+		d.erase("spawn")
 	if oneway_on.button_pressed:
 		var ow := {}
 		for k in oneway_flags:

@@ -1,6 +1,7 @@
 extends "res://scripts.gd"
 # Game Mode window (G): the visual scripting graph of scripts.gd for a game mode, its own file instead of the map's
-# script. A mode file (<game>/Modes/<name>.lp2mode, JSON) = {format, name, description, base, settings, requires, script}.
+# script. A mode file (<game>/Modes/<name>.lp2mode, JSON) = {format, name, description, base, settings, requires, script};
+# saving also packages it as <game>/GameModes/<name>.zip (lp2mode.py --package), which the game loads first.
 # The xlive mod runs it during the match (the host decides, as with map scripts) on any map that has what it requires.
 # - Settings: the mode's own lobby rows; each is a variable of the same name in the graph, set from the lobby.
 # - Requirements: script markers / volumes the map must have (by name or wildcard, at least N). Scan fills them from the
@@ -221,7 +222,12 @@ func save_mode(path: String) -> void:
 	_title()
 	main.log_line("Game mode: saved %s." % path)
 	# the runtime graph the game loads ("compiled", lp2mode.py); the game runs the mode named in its folder's mode.txt
-	main.run_tool("lp2mode.py", [path], func(): main.log_line("Game mode: compiled for the game (put \"%s\" in mode.txt in the game folder to play it)." % path.get_file().get_basename()))
+	# and packaged: <game>/GameModes/<name>.zip (mode.json + the mode, plus a "<name>.content" folder's files), what the game loads
+	var args := [path]
+	if "game" in main and str(main.game) != "":
+		args += ["--package", str(main.game).path_join("GameModes")]
+	main.run_tool("lp2mode.py", args, func(): main.log_line("Game mode: compiled%s (put \"%s\" in mode.txt in the game folder to play it)." % [
+		" and packaged in GameModes" if args.size() > 1 else "", path.get_file().get_basename()]))
 
 func _ask_path(saving: bool) -> void:
 	DirAccess.make_dir_recursive_absolute(modes_dir())
