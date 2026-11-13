@@ -134,7 +134,8 @@ var browser: Window
 var mesh_builder: Window
 var lighting: Window
 var fog_win: Window
-var nav_win: Window     # navmesh.gd
+var nav_win: Control    # navmesh.gd: the Navmesh toolbar
+var toolbar_slot: VBoxContainer   # under the main bars: the open toolbar (one at a time)
 var nav_test := false   # --navmesh: the window open and the navmesh shown in the screenshot
 var scripts_win: Window   # scripts.gd: visual scripting (K)
 var modes_win: Window     # modes.gd: game mode scripting (J), its own .lp2mode file
@@ -442,7 +443,7 @@ func _build_ui() -> void:
 	_button(bar, "Lighting (L)", toggle_lighting).tooltip_text = "The sun, sky light, sky dome and placed point / spot lights"
 	_button(bar, "Map info (I)", toggle_info).tooltip_text = "Name, size, water and kill floor heights, physics rebuild"
 	_button(bar, "Fog & weather (H)", toggle_fog).tooltip_text = "Distance fog, low-lying height fog, rain / snow / ash and no-weather boxes"
-	_button(bar, "Navmesh (N)", func(): nav_win.toggle()).tooltip_text = "Build the bots' navigation mesh (playable area only) and set the radar floors"
+	_button(bar, "Navmesh (N)", func(): nav_win.toggle()).tooltip_text = "The Navmesh toolbar: generate the bots' navigation mesh (playable area only), edit it, set the radar floors"
 	_button(bar, "Scripts (K)", toggle_scripts).tooltip_text = "Visual scripting: events (volumes entered, timers) switch volumes' effects during the match (experimental, xlive mod)"
 	_button(bar, "Game Mode (J)", toggle_modes).tooltip_text = "Game mode scripting: a mode as its own file (Modes folder), with lobby settings and the markers / volumes a map needs for it; saving compiles it for the game (mode.txt in the game folder picks the one to play)"
 	_button(bar, "Place (T)", toggle_placer).tooltip_text = "Place spawn points, weapons, VS and volumes: click the map to put one down, drag to aim it (volumes: drag out the floor)"
@@ -546,6 +547,10 @@ func _build_ui() -> void:
 	if wire_on_start:
 		wire_toggle.button_pressed = true
 	set_tool(0)
+
+	toolbar_slot = VBoxContainer.new()
+	toolbar_slot.visible = false
+	root.add_child(toolbar_slot)
 
 	var mid := HBoxContainer.new()
 	mid.size_flags_vertical = Control.SIZE_EXPAND_FILL
@@ -907,9 +912,9 @@ void fragment() {
 	fog_win.set_script(load("res://fog.gd"))
 	add_child(fog_win)
 	fog_win.setup(self)
-	nav_win = Window.new()
+	nav_win = PanelContainer.new()
 	nav_win.set_script(load("res://navmesh.gd"))
-	add_child(nav_win)
+	toolbar_slot.add_child(nav_win)
 	nav_win.setup(self)
 	nav_win.show_box.button_pressed = nav_toggle.button_pressed
 	nav_toggle.toggled.connect(func(on): nav_win.show_box.button_pressed = on)
@@ -932,7 +937,7 @@ void fragment() {
 	# Place is its own OS window: while it's open, the view takes the focus back as soon as the mouse is over it, so
 	# the first click there places instead of only focusing the editor
 	get_window().mouse_entered.connect(func(): if placer.visible and not get_window().has_focus(): get_window().grab_focus())
-	var tool_windows: Array[Window] = [info_win, browser, lighting, settings_win, new_win, fog_win, nav_win,
+	var tool_windows: Array[Window] = [info_win, browser, lighting, settings_win, new_win, fog_win,
 		placer, scripts_win]
 	for w: Window in tool_windows:
 		w.window_input.connect(_on_tool_window_input.bind(w))   # Ctrl+S saves from any of them too
@@ -972,6 +977,15 @@ func _vec_row(parent: Control, title: String, lo: float, hi: float, step: float,
 	return out
 
 # a toolbar row that scrolls sideways when the window is too narrow for it
+func toggle_toolbar(tb: Control) -> void:
+	# toolbars (Navmesh so far) sit under the main bars, one at a time: opening one closes the other; again closes it
+	var show := not tb.visible
+	for c in toolbar_slot.get_children():
+		if c != tb and c.visible:
+			c.visible = false
+	tb.visible = show
+	toolbar_slot.visible = show
+
 func _scroll_row(parent: Control) -> HBoxContainer:
 	var sc := ScrollContainer.new()
 	sc.vertical_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
@@ -2481,7 +2495,6 @@ func _screenshot() -> void:
 		await get_tree().create_timer(0.5).timeout
 		await RenderingServer.frame_post_draw
 		get_viewport().get_texture().get_image().save_png(screenshot_path.get_basename() + "-navview.png")
-		nav_win.get_texture().get_image().save_png(screenshot_path.get_basename() + "-navmesh.png")
 	if lighting.visible:
 		lighting.get_texture().get_image().save_png(screenshot_path.get_basename() + "-lighting.png")
 		if not selection.is_empty():

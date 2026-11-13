@@ -55,14 +55,32 @@ project.
   [preview]: run, walk, crouch_speed, jump, gravity, height, crouch_height, radius, grapple_range, grapple_speed,
   slope, step, fov).
 - Opening a floating window closes the others.
-- **Navmesh (N)**: Build navmesh makes the bots' navigation from the movement collision (placed and moved pieces
-  included), limited to the playable area: the walkable parts connected to the layout's markers (short jumps,
-  drops, and the grapple's 11 m reach count), above the kill floor, outside kill volumes and, if the map has any
-  **Map limits** volumes (Add volume; stack several, or add boxes to one, for odd shapes), inside one of them. Shown over the level, coloured by radar floor; tick
-  "Show what was left out" to see the dropped parts in red. **Radar floors**: no planes = the whole map is one floor;
-  each added plane (up to 8, so 9 floors, as stock ONLINE_08) starts a new floor above it, up to the next plane.
-  **Preview radar** draws the cockpit radar's floor images; the export packs them with zones that switch the radar
-  to the floor the player is on (needs a built navmesh, else the radar stays blank).
+- **Navmesh (N)**: a toolbar under the main bars (toolbars replace floating windows, one open at a time; N or the
+  button again closes it). **Generate** builds the bots' navigation from the movement collision (placed and moved pieces
+  included), limited to the playable area: the walkable parts connected to the layout's markers (short jumps, drops, and
+  the grapple's 11 m reach count), above the kill floor, outside kill volumes and, if the map has any **Map limits**
+  volumes, inside one of them. **Generate ▾**: Step height, Steepest slope, Edge clearance, **Weld gaps up to** (joins
+  pieces whose edges are that close with no wall between), Default settings, Discard hand edits.
+  **Import** / **Export**: the navmesh as an OBJ (metres, Y up: Blender's defaults); an imported one is used by Generate.
+  - Tools (one at a time; it takes the view's left clicks until you press it again, press Esc, or close the toolbar;
+    right drag still looks round):
+    - **Hand edit**: the built navmesh becomes the map's own (`assets/nav/edited.obj`, project.json `"nav_mesh"`), which
+      Generate then uses. Click / Shift+click / drag a box to select triangles; drag a corner onto another to merge them.
+      **Enter** turns the selection into one n-gon (holes stay holes): drag its corners (**Snap**: onto the level under
+      the mouse), click its outline to add a corner (a triangle outside on that edge is split to match), Delete removes
+      the corner under the mouse (not one a triangle outside uses); Enter again re-triangulates it, Esc cancels.
+      Ctrl+Z / **Undo**.
+    - **Remove** (click: a whole piece) / **Remove brush** (drag, radius beside it): taken out at the next Generate (grey
+      until then). **Add** / **Add brush**: put left-out (red) parts back in (blue), whatever left them out.
+    - **Weld**: click the navmesh each side of a gap bots can walk across; welds show as white (automatic) and yellow
+      (by hand) lines, orange until built.
+  - **Floors ▾**: radar floor planes (no planes = one floor; each plane, up to 8, starts a new floor above it; drag them
+    in the view while no tool is on) and **Preview radar** (the export packs the floor images with zones that switch the
+    radar to the player's floor; needs a built navmesh).
+  - **Edits ▾**: the welds and the removed / added parts, each with Show and Undo.
+  - **View ▾**: show in the view, show what was left out (red), **Colour by** radar floor or **Piece** (each part bots can
+    walk around has its own colour, the largest green: bots can't path between pieces, so two colours meeting where you
+    can walk across is a split to weld or hand edit), and the last build's numbers.
 - **Lighting (L)**, work in progress (doesn't fully match the game yet): sun (direction, colour x brightness), sky light from above / below and ambient (the game's
   hemisphere and ambient lights), a stock map's day as a preset, the sky dome (the map's own, a stock map's sky,
   or a panorama image copied into `assets/`) and atmosphere (scattering preset, haze, sky tint). Placed point and
