@@ -57,6 +57,7 @@ var haze_density: SpinBox
 var grade_pick: OptionButton
 var curve_ed: Control        # curves.gd
 var light_ed := {}           # the window's light editor: {box, title, rows: field -> control, node: the light shown}
+var props_ed := {}           # the same in the main window's Properties panel (one light selected)
 var popup_ed := {}           # the same in the right-click popup
 var light_popup: PopupPanel
 var bake_source: OptionButton
@@ -247,6 +248,9 @@ func setup(m: Node) -> void:
 	main._button(pb, "Lighting window", func(): light_popup.hide(); popup())
 	pv.add_child(pb)
 	main.add_child(light_popup)
+	props_ed = _light_editor()
+	props_ed["box"].visible = false
+	main.props_box.add_child(props_ed["box"])
 	visibility_changed.connect(func(): if visible: refresh())
 
 func _heading(t: String) -> Label:
@@ -975,8 +979,9 @@ func _on_light_changed(ed: Dictionary) -> void:
 	if ref != null and is_instance_valid(ref):
 		(ref as TreeItem).set_text(0, label(d))
 	ed["title"].text = label(d)
-	if ed == popup_ed and visible:
-		_show_light()
+	for other in [light_ed, popup_ed, props_ed]:   # the other editors showing this light follow
+		if other != ed and not other.is_empty() and other["node"] == n and other["box"].is_visible_in_tree():
+			_fill(other, n)
 
 func light_menu(n: Node3D, at: Vector2) -> void:
 	# right-click on a light: select it and edit it in a popup by the mouse
@@ -995,5 +1000,10 @@ func selection_changed() -> void:
 	for n in main.markers_root.get_children():
 		if is_light(n):
 			_update_ranges(n)
+	var ls := _selected_lights()
+	props_ed["box"].visible = ls.size() == 1
+	if ls.size() == 1:
+		_fill(props_ed, ls[0])
+	main.update_props_panel()
 	if visible:
 		_show_light()

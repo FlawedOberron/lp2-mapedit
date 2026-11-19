@@ -6,8 +6,8 @@ extends PanelContainer
 # (a step over the step height, a slope over the slope limit, a ramp narrower than the edge clearance) strands them.
 # Welds join pieces: automatic (open edges within "Weld gaps up to", no wall between) and by hand (two clicks on the
 # navmesh: project.json "nav_welds" [{a, b}] in cm). Generation settings: project.json "nav_settings".
-# Remove: whole pieces (a click) and brushed areas (a drag), project.json "nav_removed" (lp2navmap.removed), grey here
-# until the next build applies them.
+# Remove: whole pieces (a click) and brushed areas (a drag), project.json "nav_removed" (lp2navmap.removed), white here
+# until the next build applies them. While Remove / Add (or their brushes) is on, the view shows just MARK_* colours.
 # Radar floors: horizontal planes (project.json radar.floors, heights in cm, ascending): each starts a new floor
 # above it, up to the next one. No planes = the whole map is one floor; at most MAX_PLANES (9 radar floors,
 # as stock ONLINE_08). The radar itself is drawn from the navmesh later (map-editor-plan.md, NEXT).
@@ -27,6 +27,12 @@ const WELD_HAND := Color(1.0, 0.85, 0.1)
 const WELD_NEW := Color(1.0, 0.5, 0.1)
 const REMOVED := Color(0.25, 0.25, 0.28, 0.55)   # taken out by hand (applied at the next build)
 const ADDED := Color(0.35, 0.9, 1.0, 0.55)       # left out but put back by hand (applied at the next build)
+# while Remove / Add / their brushes are on: four colours only (the floor / piece colours have reds and blues too)
+const MARK_KEPT := Color(0.2, 0.8, 0.3, 0.30)    # kept
+const MARK_LEFT := Color(1.0, 0.12, 0.08, 0.55)  # left out (outside the playable area, or removed by an earlier build)
+const MARK_REMOVE := Color(1.0, 1.0, 1.0, 0.85)  # taken out at the next Generate
+const MARK_ADD := Color(0.15, 0.45, 1.0, 0.85)   # put back at the next Generate
+const MARK_LEGEND := "  [green kept, red left out, white: removed / blue: added at the next Generate]"
 const REMOVE_UP := 2.0   # m: a brushed point takes triangles whose middle is within this above or below it (lp2navmap)
 
 var main: Node
@@ -47,6 +53,13 @@ var welds_box: VBoxContainer
 var mode_btns := {}                # mode -> its toggle button
 var info_short: Label
 var edit_tools: HBoxContainer       # Snap + Undo, shown while hand editing
+var clean_apply: Button             # Clean up preview: Apply / Cancel
+var clean_cancel: Button
+var _clean_tick := 0                # the angle's latest change (re-preview after it settles)
+
+func cleanup_buttons(show: bool) -> void:
+	clean_apply.visible = show
+	clean_cancel.visible = show
 var _tris := PackedVector3Array()   # the navmesh view's triangles (m), 3 per triangle
 var _kept := PackedByteArray()
 var _piece := PackedInt32Array()    # piece per triangle (-1 dropped; empty: built before pieces)
@@ -172,6 +185,25 @@ func setup(m: Node) -> void:
 			snap_box.toggled.connect(func(on): edit.snap = on)
 			edit_tools.add_child(snap_box)
 			_btn(edit_tools, "Undo", func(): edit.undo(), "Undo the last hand edit (Ctrl+Z)")
+			var clean_spin: SpinBox = main._spin(0.5, 30.0, 0.5)
+			clean_spin.suffix = "°"
+			clean_spin.value = 5.0
+			clean_spin.tooltip_text = "Clean up: triangles whose slopes differ by up to this much count as one surface"
+			clean_spin.custom_minimum_size.x = 70
+			clean_spin.size_flags_horizontal = Control.SIZE_SHRINK_BEGIN
+			_btn(edit_tools, "Clean up", func(): edit.preview_cleanup(clean_spin.value), "Preview simplifying the selection (none: the whole navmesh): each surface of joined triangles at about the same slope becomes as few triangles as its outline needs (corners inside it and on straight edges go; new triangles show yellow). Corners other triangles use stay, so nothing comes apart. Change the angle to compare, then Apply (Enter) or Cancel (Esc)")
+			edit_tools.add_child(clean_spin)
+			clean_spin.value_changed.connect(func(_v):
+				# re-preview once the angle stops changing (a big navmesh takes seconds)
+				_clean_tick += 1
+				var tick := _clean_tick
+				get_tree().create_timer(0.4).timeout.connect(func():
+					if tick == _clean_tick and edit.previewing:
+						edit.preview_cleanup(clean_spin.value)))
+			clean_apply = _btn(edit_tools, "Apply", func(): edit.apply_cleanup(), "Keep the clean up shown (Enter); Ctrl+Z undoes it")
+			clean_cancel = _btn(edit_tools, "Cancel", func(): edit.cancel_cleanup(), "Back to the navmesh as it was (Esc)")
+			cleanup_buttons(false)
+			_btn(edit_tools, "Quick simplify", func(): edit.start_quick(), "Click 4 corners: the triangles inside them become one flat piece with just those corners (plus any the triangles around it still use, so nothing comes apart). Click a corner again to unpick it; Enter after 3: a triangle; Esc cancels")
 			row.add_child(edit_tools)
 			row.add_child(VSeparator.new())
 		if k == "add_brush":
@@ -354,7 +386,7 @@ func handle_input(e: InputEvent) -> bool:
 	# round), Esc stops it; with none, left click / drag moves a floor plane up and down and no other clicks reach the
 	# level. -> true when the event is used
 	if e is InputEventKey and e.pressed and not e.echo and e.keycode == KEY_ESCAPE and _mode != "":
-		if _mode == "edit" and (edit.ngon or not edit.sel.is_empty()):
+		if _mode == "edit" and (edit.ngon or edit.previewing or edit.quick or not edit.sel.is_empty()):
 			return edit.handle_input(e)   # cancel the n-gon / the selection first
 		if _mode == "weld" and _weld_a != null:
 			_weld_a = null
@@ -554,7 +586,7 @@ func _set_mode(m: String) -> void:
 	Input.set_default_cursor_shape(MODES[m][1] if m != "" else Input.CURSOR_ARROW)
 	if m != "":
 		main.get_viewport().gui_release_focus()   # Enter / Delete go to the tool, not a focused control
-		main.set_status(MODES[m][2])
+		main.set_status(MODES[m][2] + (MARK_LEGEND if _marking(m) else ""))
 	elif was != "":
 		main.set_status("")
 	if m == "edit" and was != "edit":
@@ -838,7 +870,9 @@ func build() -> void:
 		if res is Dictionary:
 			main.project["navmesh"] = res
 			main.save_project()
-			main.set_status("Navmesh built: %d polygons" % int(res.get("polygons", 0)))
+			var skipped := int(res.get("skipped_marks", 0))
+			main.set_status("Navmesh built: %d polygons%s" % [int(res.get("polygons", 0)), "" if skipped == 0 else
+				" - %d Remove click%s skipped: %s on the main floor now (see the log)" % [skipped, "" if skipped == 1 else "s", "it lands" if skipped == 1 else "they land"]])
 		refresh()
 		show_box.button_pressed = true
 		_update_view())
@@ -916,6 +950,9 @@ func load_view() -> void:
 			_tris[i] = Vector3(raw[i * 3], raw[i * 3 + 1], raw[i * 3 + 2]) * main.CM
 	_rebuild_overlay()
 
+static func _marking(m: String) -> bool:
+	return m in ["remove", "remove_brush", "add", "add_brush"]
+
 func _rebuild_overlay() -> void:
 	var pos := PackedVector3Array()
 	var cols := PackedColorArray()
@@ -930,9 +967,10 @@ func _rebuild_overlay() -> void:
 		if _added[t] == 1:
 			live[t] = 1
 	_removed = _mask("nav_removed", live, _mode == "remove_brush")
+	var marking := _marking(_mode)
 	for t in _kept.size():
 		var keep := _kept[t] == 1
-		if not keep and not dropped_box.button_pressed and _added[t] == 0:
+		if not keep and not dropped_box.button_pressed and _added[t] == 0 and not marking:
 			continue
 		var a := _tris[t * 3]
 		var b := _tris[t * 3 + 1]
@@ -952,6 +990,9 @@ func _rebuild_overlay() -> void:
 			col = ADDED
 		if (keep or _added[t] == 1) and _removed[t] == 1:
 			col = REMOVED
+		if marking:
+			col = MARK_REMOVE if (keep or _added[t] == 1) and _removed[t] == 1 else MARK_ADD if _added[t] == 1 \
+				else MARK_KEPT if keep else MARK_LEFT
 		var lift := Vector3(0, 0.2, 0)   # 20 cm off the floor it lies on, clear of the stage (and its slopes)
 		pos.append_array([a + lift, c + lift, b + lift])
 		cols.append_array([col, col, col])

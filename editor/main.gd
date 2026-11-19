@@ -160,6 +160,8 @@ var insp_pos: Array = []
 var insp_rot: Array = []
 var insp_scale: Array = []
 var insp_rows: Array = []   # rows hidden for markers (tilt, scale)
+var props_box: VBoxContainer   # the Properties panel under the inspector: what the selected object is set up as
+var props_panel: Control
 var piece_buttons: Array = []
 var mesh_col: CheckBox   # selected pieces: collision made from their visible mesh
 var dyn_box: CheckBox      # the selected pieces are dynamic: lit by the bake, no baked shadows
@@ -209,6 +211,10 @@ const WALL := -1000000         # col_owner of collision-only wall k: WALL - k (n
 var col_key := ""             # the inputs the shown collision view was built from (_collision_key)
 var col_walls := {}            # wall id -> Node3D (meta "wall"), selectable while View collision is on
 var open_dialog: FileDialog
+var recent_menu: MenuButton
+var open_confirm: ConfirmationDialog   # "unsaved changes" before Open / Recent replaces the map
+var open_pending := ""
+const RECENT_MAX := 10
 var perf_button: Button
 var perf_bar: ProgressBar
 var perf_panel: PanelContainer
@@ -434,6 +440,13 @@ func _build_ui() -> void:
 	new_menu.get_popup().id_pressed.connect(func(i): new_map() if i == 0 else new_game_mode())
 	bar.add_child(new_menu)
 	_button(bar, "Open...", _on_open)
+	recent_menu = MenuButton.new()
+	recent_menu.text = "Recent"
+	recent_menu.flat = false
+	recent_menu.tooltip_text = "Maps opened or saved lately (newest first)"
+	recent_menu.about_to_popup.connect(_fill_recent)
+	recent_menu.get_popup().id_pressed.connect(_on_recent)
+	bar.add_child(recent_menu)
 	_button(bar, "Save", save_project)
 	_button(bar, "Save as...", _on_save_as)
 	_button(bar, "Install to game", install_package).tooltip_text = "Save, export, and copy the package to the game's Maps folder"
@@ -599,6 +612,11 @@ func _build_ui() -> void:
 	rightbox.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var right := VBoxContainer.new()
 	right.custom_minimum_size.x = 296
+	props_box = VBoxContainer.new()   # filled below (and by volumes, terrain, lighting): shown while any part is
+	props_box.custom_minimum_size.x = 296
+	var props_head := _label("Properties")
+	props_head.add_theme_color_override("font_color", Color(0.75, 0.82, 1.0))
+	props_box.add_child(props_head)
 	insp_title = _label("Nothing selected")
 	insp_title.autowrap_mode = TextServer.AUTOWRAP_WORD
 	right.add_child(insp_title)
@@ -647,7 +665,7 @@ func _build_ui() -> void:
 	pickup_pick.item_selected.connect(_on_pickup)
 	prow.add_child(pickup_pick)
 	pickup_row = prow
-	right.add_child(prow)
+	props_box.add_child(prow)
 	var trow := HBoxContainer.new()
 	trow.add_child(_label("Tier"))
 	tier_pick = OptionButton.new()
@@ -658,10 +676,10 @@ func _build_ui() -> void:
 	tier_pick.item_selected.connect(_on_tier)
 	trow.add_child(tier_pick)
 	tier_row = trow
-	right.add_child(trow)
+	props_box.add_child(trow)
 	vs_props = VBoxContainer.new()
 	vs_props.set_script(load("res://vsprops.gd"))
-	right.add_child(vs_props)
+	props_box.add_child(vs_props)
 	vs_props.setup(self)
 	var dbox := VBoxContainer.new()
 	var drow := HBoxContainer.new()
@@ -682,7 +700,7 @@ func _build_ui() -> void:
 	dig_pile.item_selected.connect(func(_i): _on_dig())
 	dbox.add_child(dig_pile)
 	dig_row = dbox
-	right.add_child(dbox)
+	props_box.add_child(dbox)
 	var post_box := HBoxContainer.new()
 	post_box.add_child(_label("Post number"))
 	post_num = _spin(1, 64, 1)
@@ -690,7 +708,7 @@ func _build_ui() -> void:
 	post_num.value_changed.connect(_on_post_num)
 	post_box.add_child(post_num)
 	post_row = post_box
-	right.add_child(post_box)
+	props_box.add_child(post_box)
 	var tbox := VBoxContainer.new()
 	tbox.add_child(_label("On game types"))
 	var tg := GridContainer.new()
@@ -707,7 +725,7 @@ func _build_ui() -> void:
 	type_exists.autowrap_mode = TextServer.AUTOWRAP_WORD
 	tbox.add_child(type_exists)
 	type_box = tbox
-	right.add_child(tbox)
+	props_box.add_child(tbox)
 	# Map info: a floating window (I), like the other tools
 	info_win = Window.new()
 	info_win.title = "Map info"
@@ -818,6 +836,9 @@ void fragment() {
 	physics_on.toggled.connect(_on_physics)
 	iv.add_child(physics_on)
 	rightbox.add_child(_panel(right))
+	props_panel = _panel(props_box)
+	props_panel.visible = false
+	rightbox.add_child(props_panel)
 	perf_panel = PanelContainer.new()
 	var pv := VBoxContainer.new()
 	pv.add_child(_label("Performance"))
@@ -857,9 +878,16 @@ void fragment() {
 	open_dialog.access = FileDialog.ACCESS_FILESYSTEM
 	open_dialog.title = "Open a map"
 	open_dialog.filters = PackedStringArray(["*.lpme ; LP2 map", "project.json ; Older map project folder"])
-	open_dialog.file_selected.connect(_on_open_file)
+	open_dialog.file_selected.connect(_open_checked)
 	open_dialog.use_native_dialog = true
 	add_child(open_dialog)
+	open_confirm = ConfirmationDialog.new()
+	open_confirm.title = "Unsaved changes"
+	open_confirm.ok_button_text = "Save, then open"
+	open_confirm.add_button("Open without saving", true, "discard")
+	open_confirm.confirmed.connect(func(): save_project(); _on_open_file(open_pending))
+	open_confirm.custom_action.connect(func(_a): open_confirm.hide(); _on_open_file(open_pending))
+	add_child(open_confirm)
 	save_as_dialog = FileDialog.new()
 	save_as_dialog.file_mode = FileDialog.FILE_MODE_SAVE_FILE
 	save_as_dialog.access = FileDialog.ACCESS_FILESYSTEM
@@ -888,12 +916,12 @@ void fragment() {
 	volumes = Node.new()
 	volumes.set_script(load("res://volumes.gd"))
 	add_child(volumes)
-	volumes.setup(self, type_box.get_parent())
+	volumes.setup(self, props_box)
 	volumes.add_menu(vrow_add)
 	terrain = Node.new()
 	terrain.set_script(load("res://terrain.gd"))
 	add_child(terrain)
-	terrain.setup(self, type_box.get_parent())
+	terrain.setup(self, props_box)
 	terrain.add_button(vrow_add)
 	settings_win = Window.new()
 	settings_win.set_script(load("res://settings.gd"))
@@ -1045,6 +1073,62 @@ func _press_key(k: int, ctrl := false) -> void:
 	ev.ctrl_pressed = ctrl
 	_unhandled_input(ev)
 	await get_tree().process_frame
+
+func _pick_probe() -> void:
+	# rays from above at a grid over the map: the physics hit Quick place uses vs the visible surfaces (each visible
+	# mesh gets a temporary collision body on layer 20 for the comparison)
+	const PROBE := 1 << 19
+	var owner_of := {}
+	var box := AABB()
+	var add := func(f: Callable, n: Node) -> void:
+		for c in n.get_children():
+			if c is MeshInstance3D and (c as MeshInstance3D).is_visible_in_tree() and (c as MeshInstance3D).mesh \
+					and (c as MeshInstance3D).mesh.get_surface_count() > 0 and not (c.get_parent() is Camera3D):
+				var mi := c as MeshInstance3D
+				var faces := mi.mesh.get_faces()
+				if faces.size() >= 3:
+					var b := StaticBody3D.new()
+					b.collision_layer = PROBE
+					b.collision_mask = 0
+					var cs := CollisionShape3D.new()
+					var sh := ConcavePolygonShape3D.new()
+					sh.backface_collision = true
+					sh.set_faces(faces)
+					cs.shape = sh
+					b.add_child(cs)
+					mi.add_child(b)
+					owner_of[b.get_rid()] = str(n.name) + "/" + str(mi.name)
+					var wb := mi.global_transform * mi.get_aabb()
+					box = wb if box.size == Vector3.ZERO else box.merge(wb)
+			f.call(f, c)
+	add.call(add, world)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	print("pick-probe: %d visible meshes, bounds %s" % [owner_of.size(), box])
+	var bad := {}
+	var n := 0
+	for gx in 120:
+		for gz in 120:
+			var x := box.position.x + box.size.x * (gx + 0.5) / 120.0
+			var z := box.position.z + box.size.z * (gz + 0.5) / 120.0
+			var from := Vector3(x, box.end.y + 10.0, z)
+			var to := Vector3(x, box.position.y - 10.0, z)
+			var v := _ray(from, to, PROBE)
+			if v.is_empty():
+				continue
+			n += 1
+			var hit := _ray(from, to, 1 << (LAYER_STAGE - 1))
+			var gap: float = v["position"].y - (hit["position"].y if hit else box.position.y - 10.0)
+			if gap > 0.1:
+				var key: String = owner_of.get(v["rid"], "?")
+				if not bad.has(key):
+					bad[key] = [0, 0.0, v["position"], hit.get("collider")]
+				bad[key][0] += 1
+				bad[key][1] = maxf(bad[key][1], gap)
+	print("pick-probe: %d columns over something visible; the placing ray lands below the visible top under:" % n)
+	for k in bad:
+		print("  %s: %d columns, up to %.1f m under, e.g. at %s (ray hit %s)" % [k, bad[k][0], bad[k][1], bad[k][2], bad[k][3]])
+	get_tree().quit()
 
 func _quick_test() -> void:
 	# the ground a little left and right of the middle of the view
@@ -1398,6 +1482,55 @@ func set_tool(m: int) -> void:
 func _on_open() -> void:
 	open_dialog.popup_centered_ratio(0.6)
 
+func _open_checked(path: String) -> void:
+	# Open / Recent: ask first when the open map has unsaved changes
+	if project_dir != "" and _saved_state() != saved_state:
+		open_pending = path
+		open_confirm.dialog_text = "The open map has unsaved changes. Save them before opening %s?" % path.get_file()
+		open_confirm.popup_centered()
+	else:
+		_on_open_file(path)
+
+func _remember(path: String) -> void:
+	# the reopen-on-start entry plus the Recent list (workspaces of .lpme files stay out: the file is listed)
+	cfg.set_value("recent", "project", path)
+	if not path.simplify_path().begins_with(ProjectSettings.globalize_path("user://work")):
+		var list: Array = cfg.get_value("recent", "list", [])
+		list.erase(path)
+		list.push_front(path)
+		cfg.set_value("recent", "list", list.slice(0, RECENT_MAX))
+	cfg.save(SETTINGS)
+
+func _fill_recent() -> void:
+	var pop := recent_menu.get_popup()
+	pop.clear()
+	var list: Array = cfg.get_value("recent", "list", [])
+	var last: String = cfg.get_value("recent", "project", "")
+	if list.is_empty() and FileAccess.file_exists(last):   # before the list existed: the last map
+		list = [last]
+	for i in list.size():
+		var p: String = list[i]
+		var lpme := p.get_extension().to_lower() == "lpme"
+		var here := FileAccess.file_exists(p) if lpme else DirAccess.dir_exists_absolute(p)
+		pop.add_item("%s%s   (%s)" % [p.get_file().get_basename() if lpme else p.get_file(), "" if here else "  [missing]", p.get_base_dir()], i)
+		pop.set_item_disabled(pop.item_count - 1, not here)
+		pop.set_item_tooltip(pop.item_count - 1, p)
+	if list.is_empty():
+		pop.add_item("(nothing yet)", -1)
+		pop.set_item_disabled(pop.item_count - 1, true)
+	else:
+		pop.add_separator()
+		pop.add_item("Clear list", 1000)
+
+func _on_recent(id: int) -> void:
+	if id == 1000:
+		cfg.set_value("recent", "list", [])
+		cfg.save(SETTINGS)
+		return
+	var list: Array = cfg.get_value("recent", "list", [])
+	var p: String = list[id] if id < list.size() else cfg.get_value("recent", "project", "")
+	_open_checked(p if p.get_extension().to_lower() == "lpme" else p.path_join("project.json"))
+
 func _on_open_file(path: String) -> void:
 	if path.get_extension().to_lower() == "lpme":
 		open_map_file(path)
@@ -1415,8 +1548,7 @@ func open_map_file(path: String) -> void:
 		return
 	project_file = path
 	if screenshot_path == "":
-		cfg.set_value("recent", "project", path)
-		cfg.save(SETTINGS)
+		_remember(path)
 	DisplayServer.window_set_title("LP2 Map Editor - %s" % path.get_file())
 
 func _pack() -> void:
@@ -1595,8 +1727,7 @@ func open_project(dir: String) -> void:
 			if q.get("role", "") == "object" and not q.has("post"):
 				q["post"] = next_post_number(st)
 	if screenshot_path == "":   # test runs (--screenshot) don't become the project the editor reopens
-		cfg.set_value("recent", "project", dir)
-		cfg.save(SETTINGS)
+		_remember(dir)
 	updating_ui = true
 	info_name.text = project["info"].get("name", "")
 	_show_thumbnail()
@@ -1718,8 +1849,7 @@ func save_project_as(path: String) -> void:
 	project_dir = ws
 	project_file = path
 	library.load_imports(ws)
-	cfg.set_value("recent", "project", path)
-	cfg.save(SETTINGS)
+	_remember(path)
 	save_project()
 	DisplayServer.window_set_title("LP2 Map Editor - %s" % path.get_file())
 	log_line("Saved as %s (copied from %s; package tag %s)" % [path, old, project["info"]["tag"]])
@@ -2286,6 +2416,8 @@ func _screenshot() -> void:
 		await _input_test()
 	if OS.get_cmdline_user_args().has("--quick-test"):   # Q, Ctrl+Q, Esc and the light range spheres through the real input path
 		await _quick_test()
+	if OS.get_cmdline_user_args().has("--pick-probe"):   # where Quick place's ray lands against the visible surfaces
+		await _pick_probe()
 	if OS.get_cmdline_user_args().has("--terrain-test"):   # add a terrain, Ctrl+drag its sides, undo / redo, save
 		await _terrain_test()
 	if OS.get_cmdline_user_args().has("--damage-test"):   # a lava volume, its inspector
@@ -3044,6 +3176,18 @@ func _show_inspector() -> void:
 			insp_rot[a].value = rot[a]
 			insp_scale[a].value = sc[a]
 	updating_ui = false
+	update_props_panel()
+
+func update_props_panel() -> void:
+	# the Properties panel shows while any of its sections does (the heading is child 0)
+	if props_panel == null:
+		return
+	var any := false
+	for c in props_box.get_children().slice(1):
+		if (c as Control).visible:
+			any = true
+			break
+	props_panel.visible = any
 
 func _on_inspector() -> void:
 	if updating_ui or selection.size() != 1:
@@ -3398,6 +3542,18 @@ func _pick(mp: Vector2) -> Node3D:
 	for n in markers_root.get_children():
 		if not n.visible or n.has_meta("terrain"):   # hidden by the view toggles; terrains: by their ground
 			continue
+		if n.has_meta("light"):   # a light: anywhere on its ball (at least 14 px round its middle)
+			var c: Vector3 = n.global_position
+			if camera.is_position_behind(c):
+				continue
+			var sc := camera.unproject_position(c)
+			var rim := camera.unproject_position(c + camera.global_transform.basis.x * lighting.LIGHT_SIZE * 1.15)
+			if sc.distance_to(mp) < maxf(14.0, sc.distance_to(rim)):
+				var d := camera.global_position.distance_to(c)
+				if d < best_d:
+					best_d = d
+					best = n
+			continue
 		for at in [n.global_position + Vector3(0, 1.0, 0), (n.get_child(2) as Node3D).global_position]:
 			if camera.is_position_behind(at):
 				continue
@@ -3439,9 +3595,22 @@ func _ray(from: Vector3, to: Vector3, mask: int, exclude: Array = []) -> Diction
 	var q := PhysicsRayQueryParameters3D.create(from, to, mask, exclude)
 	return world.get_world_3d().direct_space_state.intersect_ray(q)
 
-func _mouse_ray(mp: Vector2, mask: int) -> Dictionary:
+func _mouse_ray(mp: Vector2, mask: int, exclude: Array = []) -> Dictionary:
+	# what the mouse points at, skipping anything hidden (a view toggle, a hidden piece): its body stays in the physics world
 	var from := camera.project_ray_origin(mp)
-	return _ray(from, from + camera.project_ray_normal(mp) * 5000.0, mask)
+	return visible_ray(from, from + camera.project_ray_normal(mp) * 5000.0, mask, exclude)
+
+func visible_ray(from: Vector3, to: Vector3, mask: int, exclude: Array = []) -> Dictionary:
+	var ex := exclude.duplicate()
+	for k in 32:
+		var hit := _ray(from, to, mask, ex)
+		if hit.is_empty():
+			return hit
+		var col = hit.get("collider")
+		if not (col is Node3D) or (col as Node3D).is_visible_in_tree():
+			return hit
+		ex.append(hit["rid"])
+	return {}
 
 # ---------------------------------------------------------------- geometry edits
 

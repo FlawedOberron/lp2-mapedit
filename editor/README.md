@@ -69,7 +69,15 @@ project.
       **Enter** turns the selection into one n-gon (holes stay holes): drag its corners (**Snap**: onto the level under
       the mouse), click its outline to add a corner (a triangle outside on that edge is split to match), Delete removes
       the corner under the mouse (not one a triangle outside uses); Enter again re-triangulates it, Esc cancels.
-      Ctrl+Z / **Undo**.
+      Ctrl+Z / **Undo**. Edits save as you go; **Generate** builds the navmesh from them (the view outside Hand edit
+      shows the last build until then).
+      **Clean up** (the selection, or the whole navmesh): previews joined triangles within the angle beside it (5°)
+      merged into as few triangles as their outline needs - corners inside them and on straight edges (3 cm) go, new
+      triangles show yellow. Change the angle to compare, then **Apply** (Enter) or **Cancel** (Esc). Corners other
+      triangles use stay, so nothing comes apart; a surface whose new triangles would sit over 8 cm off stays as it was.
+      **Quick simplify**: click 4 corners (click one again to unpick, Enter after 3: a triangle); the triangles inside
+      them (joined to them, so not other floors) become one piece with just those corners, plus any the triangles
+      around it still use.
     - **Remove** (click: a whole piece) / **Remove brush** (drag, radius beside it): taken out at the next Generate (grey
       until then). **Add** / **Add brush**: put left-out (red) parts back in (blue), whatever left them out.
     - **Weld**: click the navmesh each side of a gap bots can walk across; welds show as white (automatic) and yellow

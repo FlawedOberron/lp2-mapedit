@@ -189,7 +189,7 @@ func _aims(n: Node3D) -> bool:
 func _anchor(n: Node3D) -> Vector3:
 	if n.has_meta("light"):   # stays as high above the ground as it was
 		var from: Vector3 = n.global_position + Vector3.UP * 0.5
-		var hit: Dictionary = main._ray(from, from + Vector3.DOWN * 2000.0, 1 << (main.LAYER_STAGE - 1))
+		var hit: Dictionary = main.visible_ray(from, from + Vector3.DOWN * 2000.0, 1 << (main.LAYER_STAGE - 1))
 		return Vector3(0, maxf(0.3, n.global_position.y - hit["position"].y) if hit else 2.0, 0)
 	if main._is_marker(n) and not n.has_meta("terrain"):
 		return Vector3(0, 5.0 * main.CM, 0) if not n.has_meta("volume") else Vector3.ZERO   # 5 cm up, as placed markers
@@ -219,7 +219,7 @@ func _bodies(n: Node, out: Array) -> void:
 
 func _under_mouse(mp: Vector2) -> Dictionary:
 	var from: Vector3 = main.camera.project_ray_origin(mp)
-	return main._ray(from, from + main.camera.project_ray_normal(mp) * 5000.0, 1 << (main.LAYER_STAGE - 1), _quick_skip)
+	return main.visible_ray(from, from + main.camera.project_ray_normal(mp) * 5000.0, 1 << (main.LAYER_STAGE - 1), _quick_skip)
 
 func _follow(mp: Vector2) -> void:
 	if not is_instance_valid(_quick):

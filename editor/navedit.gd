@@ -205,6 +205,10 @@ func undo() -> void:
 	if ngon:
 		cancel_ngon()
 		return
+	if previewing or quick:
+		cancel_cleanup()
+		cancel_quick()
+		return
 	if _undo.is_empty():
 		main.set_status("Nothing to undo in the navmesh")
 		return
@@ -240,6 +244,8 @@ func set_on(v: bool) -> void:
 	if not v:
 		if ngon:
 			cancel_ngon()
+		cancel_cleanup()
+		cancel_quick()
 		sel = {}
 		_rect.visible = false
 	redraw()
@@ -264,7 +270,7 @@ func redraw(full := true) -> void:
 	var cols := PackedColorArray()
 	var lift := Vector3(0, 0.2, 0)
 	for t in nt:
-		var col: Color = COL_SEL if sel.has(t) else win.piece_colour(_pieces[t])
+		var col: Color = COL_SEL if sel.has(t) else COL_NGON if previewing and t >= _preview_from else win.piece_colour(_pieces[t])
 		pos.append_array([tv[t * 3] + lift, tv[t * 3 + 2] + lift, tv[t * 3 + 1] + lift])
 		cols.append_array([col, col, col])
 	var ng := ngon_tris()
@@ -293,7 +299,10 @@ func redraw(full := true) -> void:
 			seen[k] = true
 			lp.append_array([verts[a] + lift, verts[b] + lift])
 			lc.append_array([COL_EDGE, COL_EDGE])
-	for loop in loops:
+	var outlines: Array = loops.duplicate()
+	if quick and _picks.size() >= 2:
+		outlines.append(_sorted_picks())
+	for loop in outlines:
 		for i in loop.size():
 			lp.append_array([verts[loop[i]] + lift, verts[loop[(i + 1) % loop.size()]] + lift])
 			lc.append_array([COL_OUTLINE, COL_OUTLINE])
@@ -328,7 +337,7 @@ func _draw_handles() -> void:
 	for k in shown.size():
 		var i := shown[k]
 		mm.set_instance_transform(k, Transform3D(Basis(), verts[i] + Vector3(0, 0.2, 0)))
-		mm.set_instance_color(k, COL_HOT if i == _hot else COL_LOCKED if locked.has(i) else COL_VERT)
+		mm.set_instance_color(k, COL_HOT if i == _hot else COL_OUTLINE if quick and _picks.has(i) else COL_LOCKED if locked.has(i) else COL_VERT)
 	handles.multimesh = mm
 
 # ---------------------------------------------------------------- picking
@@ -394,6 +403,40 @@ func _outline_edge_at(at: Vector2) -> Array:
 
 func handle_input(e: InputEvent) -> bool:
 	# -> true when used. Called by navmesh.gd while hand editing (the view and the window's own keys)
+	if previewing or quick:
+		# a clean up preview: Enter applies, Esc / Ctrl+Z cancel, clicks do nothing. Quick simplify: clicks pick corners
+		if e is InputEventKey and e.pressed and not e.echo:
+			match e.keycode:
+				KEY_ENTER, KEY_KP_ENTER:
+					if previewing:
+						apply_cleanup()
+					elif _picks.size() >= 3:
+						_apply_quick()
+					return true
+				KEY_ESCAPE:
+					cancel_cleanup()
+					cancel_quick()
+					return true
+				KEY_Z:
+					if e.ctrl_pressed:
+						cancel_cleanup()
+						cancel_quick()
+						return true
+			return false
+		if e is InputEventMouseButton and e.button_index == MOUSE_BUTTON_LEFT:
+			if e.pressed:
+				_press = e.position
+			else:
+				if quick and _press != null and (e.position as Vector2).distance_to(_press) <= DRAG_PX:
+					_pick_quick(e.position)
+				_press = null
+			return true
+		if e is InputEventMouseMotion and quick:
+			var hq := _vertex_at(e.position)
+			if hq != _hot:
+				_hot = hq
+				_draw_handles()
+		return false
 	if e is InputEventKey and e.pressed and not e.echo:
 		match e.keycode:
 			KEY_ENTER, KEY_KP_ENTER:
@@ -566,51 +609,14 @@ func start_ngon() -> void:
 	if sel.is_empty():
 		main.set_status("Select triangles first (click, Shift+click, or drag a box)")
 		return
-	# the selection's outline: directed edges with no reverse among the selection
-	var directed := {}
-	for t in sel.keys():
-		for e in 3:
-			directed[Vector2i(faces[t * 3 + e], faces[t * 3 + (e + 1) % 3])] = true
-	var nxt := {}
-	for k in directed.keys():
-		if not directed.has(Vector2i(k.y, k.x)):
-			if nxt.has(k.x):
-				main.set_status("Can't make one n-gon: the selection touches itself at a corner (select a bit more or less)")
-				return
-			nxt[k.x] = k.y
-	if nxt.is_empty():
+	var r: Variant = _outline(sel.keys())
+	if r is String:
+		main.set_status("Can't make one n-gon: " + r)
 		return
-	var found: Array = []
-	var left := nxt.duplicate()
-	while not left.is_empty():
-		var start: int = left.keys()[0]
-		var loop: Array = []
-		var v := start
-		while left.has(v):
-			loop.append(v)
-			var w: int = left[v]
-			left.erase(v)
-			v = w
-		if v != start or loop.size() < 3:
-			main.set_status("Can't make one n-gon: the selection's outline doesn't close")
-			return
-		found.append(loop)
-	# the outside: the loop with the largest area (seen from above); one selection piece only
-	var best := 0
-	var areas: Array = []
-	for i in found.size():
-		areas.append(_area(found[i]))
-		if absf(areas[i]) > absf(areas[best]):
-			best = i
-	for i in found.size():
-		if i != best and signf(areas[i]) == signf(areas[best]):
-			main.set_status("Can't make one n-gon: the selection is in separate parts (one at a time)")
-			return
-	_wind = signf(areas[best]) if areas[best] != 0.0 else 1.0
-	loops = [found[best]]
-	for i in found.size():
-		if i != best:
-			loops.append(found[i])
+	if r == null:
+		return
+	loops = r[0]
+	_wind = r[1]
 	_snapshot()
 	# take the selection out while editing
 	var keep := PackedInt32Array()
@@ -626,6 +632,51 @@ func start_ngon() -> void:
 	ngon = true
 	main.set_status("N-gon: drag its corners, click its outline to add one, Delete removes the one under the mouse; Enter: done, Esc: cancel")
 	redraw()
+
+func _outline(tris: Array) -> Variant:
+	# the triangles' outline -> [loops (the outside first, then holes), winding seen from above], a String saying
+	# why there isn't one, or null when there's no outline at all
+	var directed := {}   # directed edges with no reverse among the triangles
+	for t in tris:
+		for e in 3:
+			directed[Vector2i(faces[t * 3 + e], faces[t * 3 + (e + 1) % 3])] = true
+	var nxt := {}
+	for k in directed.keys():
+		if not directed.has(Vector2i(k.y, k.x)):
+			if nxt.has(k.x):
+				return "the selection touches itself at a corner (select a bit more or less)"
+			nxt[k.x] = k.y
+	if nxt.is_empty():
+		return null
+	var found: Array = []
+	var left := nxt.duplicate()
+	while not left.is_empty():
+		var start: int = left.keys()[0]
+		var loop: Array = []
+		var v := start
+		while left.has(v):
+			loop.append(v)
+			var w: int = left[v]
+			left.erase(v)
+			v = w
+		if v != start or loop.size() < 3:
+			return "the selection's outline doesn't close"
+		found.append(loop)
+	# the outside: the loop with the largest area (seen from above); one piece only
+	var best := 0
+	var areas: Array = []
+	for i in found.size():
+		areas.append(_area(found[i]))
+		if absf(areas[i]) > absf(areas[best]):
+			best = i
+	for i in found.size():
+		if i != best and signf(areas[i]) == signf(areas[best]):
+			return "the selection is in separate parts (one at a time)"
+	var out: Array = [found[best]]
+	for i in found.size():
+		if i != best:
+			out.append(found[i])
+	return [out, signf(areas[best]) if areas[best] != 0.0 else 1.0]
 
 func _area(loop: Array) -> float:
 	var a := 0.0
@@ -688,12 +739,16 @@ func ngon_tris() -> PackedInt32Array:
 	# the n-gon triangulated (holes bridged into the outside), [] when the outline crosses itself
 	if not ngon or loops.is_empty():
 		return PackedInt32Array()
-	var outer: Array = loops[0].duplicate()
+	return _triangulate(loops, _wind)
+
+func _triangulate(lps: Array, wind: float) -> PackedInt32Array:
+	# outline loops (the outside first, then holes) -> triangles wound as `wind` seen from above, [] when it can't
+	var outer: Array = lps[0].duplicate()
 	if _area(outer) < 0.0:
 		outer.reverse()
 	var holes: Array = []
-	for k in range(1, loops.size()):
-		var h: Array = loops[k].duplicate()
+	for k in range(1, lps.size()):
+		var h: Array = lps[k].duplicate()
 		if _area(h) > 0.0:
 			h.reverse()
 		holes.append(h)
@@ -728,7 +783,7 @@ func ngon_tris() -> PackedInt32Array:
 	for k in t.size() / 3:
 		# wound as the navmesh's own (the selection's outline went round the same way as its triangles)
 		var tri := [outer[t[k * 3]], outer[t[k * 3 + 1]], outer[t[k * 3 + 2]]]
-		if signf(_area(tri)) != _wind:
+		if signf(_area(tri)) != wind:
 			tri = [tri[0], tri[2], tri[1]]
 		out.append_array(tri)
 	return out
@@ -763,3 +818,349 @@ func commit_ngon() -> void:
 	save()
 	main.set_status("N-gon done: %d triangles (rebuild the navmesh to use it)" % (t.size() / 3))
 	redraw()
+
+# ---------------------------------------------------------------- clean up
+
+const CLEAN_LINE := 0.03     # m: an outline corner this close to the straight line past it can go
+const CLEAN_HEIGHT := 0.08   # m: the new triangles may sit this far from a dropped corner, at most
+
+var previewing := false               # showing a Clean up result (faces is the result until applied / cancelled)
+var _pre_faces := PackedInt32Array()  # the faces before it
+var _pre_sel := {}
+var _preview_from := -1               # the first new triangle in the preview
+
+func preview_cleanup(max_deg: float) -> void:
+	# shows the Clean up result at max_deg (again at another angle while previewing); Apply keeps it
+	if ngon or quick:
+		main.set_status("Finish the n-gon / quick simplify first (Enter / Esc)")
+		return
+	if not previewing:
+		_pre_faces = faces.duplicate()
+		_pre_sel = sel.duplicate()
+		sel = {}
+		previewing = true
+	faces = _pre_faces.duplicate()
+	var r: Variant = _cleanup_result(max_deg, _pre_sel)
+	if r == null:
+		_preview_from = faces.size() / 3
+		main.set_status("Clean up at %.1f°: nothing to simplify%s. Esc / Cancel: back" % [max_deg, " in the selection" if not _pre_sel.is_empty() else ""])
+	else:
+		faces = r[0]
+		_preview_from = r[1]
+		main.set_status("Clean up preview at %.1f°: %d triangles -> %d (yellow: new; %d surfaces). Change the angle to compare; Enter / Apply keeps it, Esc / Cancel goes back" % [max_deg, _pre_faces.size() / 3, faces.size() / 3, r[2]])
+	win.cleanup_buttons(true)
+	redraw()
+
+func apply_cleanup() -> void:
+	if not previewing:
+		return
+	var now := faces
+	faces = _pre_faces
+	_snapshot()
+	faces = now
+	previewing = false
+	_preview_from = -1
+	_clean()
+	save()
+	win.cleanup_buttons(false)
+	redraw()
+	main.set_status("Clean up applied: %d triangles -> %d (Ctrl+Z undoes it; rebuild the navmesh to use it)" % [_pre_faces.size() / 3, faces.size() / 3])
+
+func cancel_cleanup() -> void:
+	if not previewing:
+		return
+	faces = _pre_faces
+	sel = _pre_sel
+	previewing = false
+	_preview_from = -1
+	win.cleanup_buttons(false)
+	redraw()
+	main.set_status("Clean up cancelled")
+
+func _cleanup_result(max_deg: float, scope: Dictionary) -> Variant:
+	# The triangles in scope (empty: all) in groups of triangles joined by edges, each within max_deg of its
+	# group's first triangle's normal; each group is re-triangulated from its outline without its inside corners and
+	# the outline corners on a straight line. A corner a triangle outside the groups uses stays (nothing comes apart),
+	# and groups that meet drop the same corners; a group whose new triangles would sit off the old ones stays as it was.
+	# -> [new faces (the untouched triangles first), the first new triangle, surfaces simplified], null: no change
+	var nt := faces.size() / 3
+	if nt == 0:
+		return null
+	var cos_max := cos(deg_to_rad(max_deg))
+	var normals: Array = []
+	var edge_tri := {}
+	for t in nt:
+		var a := verts[faces[t * 3]]
+		var n := (verts[faces[t * 3 + 1]] - a).cross(verts[faces[t * 3 + 2]] - a)
+		normals.append(n.normalized() if n.length() > 1e-9 else Vector3.ZERO)
+		for e in 3:
+			edge_tri[Vector2i(faces[t * 3 + e], faces[t * 3 + (e + 1) % 3])] = t
+	# groups
+	var group := PackedInt32Array()
+	group.resize(nt)
+	group.fill(-1)
+	var groups: Array = []
+	for t in nt:
+		if group[t] >= 0 or normals[t] == Vector3.ZERO or (not scope.is_empty() and not scope.has(t)):
+			continue
+		var g := groups.size()
+		var seed: Vector3 = normals[t]
+		var list: Array = [t]
+		group[t] = g
+		var i := 0
+		while i < list.size():
+			var u: int = list[i]
+			i += 1
+			for e in 3:
+				var w: int = edge_tri.get(Vector2i(faces[u * 3 + (e + 1) % 3], faces[u * 3 + e]), -1)
+				if w >= 0 and group[w] < 0 and normals[w] != Vector3.ZERO and (scope.is_empty() or scope.has(w)) \
+						and (normals[w] as Vector3).dot(seed) >= cos_max:
+					group[w] = g
+					list.append(w)
+		groups.append(list)
+	# each group's outline (a group that has none, or is one triangle, stays as it is)
+	var info: Array = []
+	for g in groups.size():
+		var r: Variant = _outline(groups[g]) if groups[g].size() >= 2 else null
+		info.append({"ok": r is Array, "loops": r[0] if r is Array else [], "wind": r[1] if r is Array else 1.0})
+	var keep := {}   # corners that stay
+	for t in nt:
+		if group[t] < 0 or not info[group[t]]["ok"]:
+			for e in 3:
+				keep[faces[t * 3 + e]] = true
+	var made := {}   # group -> its new triangles
+	var settled := false
+	while not settled:
+		settled = true
+		for g in groups.size():
+			if info[g]["ok"]:
+				for loop in info[g]["loops"]:
+					if _keep_corners(loop, keep):
+						settled = false
+		if not settled:
+			continue
+		made = {}
+		for g in groups.size():
+			if not info[g]["ok"]:
+				continue
+			var dropped: Array = []
+			var seen := {}
+			for t in groups[g]:
+				for e in 3:
+					var v := faces[t * 3 + e]
+					if not keep.has(v) and not seen.has(v):
+						seen[v] = true
+						dropped.append(v)
+			if dropped.is_empty():
+				continue
+			var lps: Array = []
+			var short := false
+			for loop in info[g]["loops"]:
+				var lp: Array = loop.filter(func(v): return keep.has(v))
+				short = short or lp.size() < 3
+				lps.append(lp)
+			var tris := PackedInt32Array() if short else _triangulate(lps, info[g]["wind"])
+			if tris.is_empty() or not _fits(tris, dropped):
+				# this group stays as it was, and so do its corners (its neighbours keep them too)
+				info[g]["ok"] = false
+				for t in groups[g]:
+					for e in 3:
+						keep[faces[t * 3 + e]] = true
+				settled = false
+				break
+			made[g] = tris
+	if made.is_empty():
+		return null
+	var out := PackedInt32Array()
+	for t in nt:
+		if group[t] < 0 or not made.has(group[t]):
+			out.append_array(faces.slice(t * 3, t * 3 + 3))
+	var first := out.size() / 3
+	for g in made:
+		out.append_array(made[g])
+	return [out, first, made.size()]
+
+func _keep_corners(loop: Array, keep: Dictionary) -> bool:
+	# marks the loop's corners needed so every dropped corner is within CLEAN_LINE of the straight line between the
+	# kept corners either side of it (the farthest one per stretch at a time); -> true when it marked any
+	var idx: Array = []
+	for k in loop.size():
+		if keep.has(loop[k]):
+			idx.append(k)
+	if idx.size() < 2:
+		var a: int = idx[0] if idx.size() == 1 else 0
+		var far := a
+		var d := -1.0
+		for k in loop.size():
+			var dd := verts[loop[k]].distance_to(verts[loop[a]])
+			if dd > d:
+				d = dd
+				far = k
+		keep[loop[a]] = true
+		keep[loop[far]] = true
+		return true
+	var more := false
+	for j in idx.size():
+		var s: int = idx[j]
+		var e: int = idx[(j + 1) % idx.size()]
+		var p := verts[loop[s]]
+		var q := verts[loop[e]]
+		var worst := -1
+		var wd := CLEAN_LINE
+		var k := (s + 1) % loop.size()
+		while k != e:
+			var c := verts[loop[k]]
+			var d := c.distance_to(Geometry3D.get_closest_point_to_segment(c, p, q))
+			if d > wd:
+				wd = d
+				worst = k
+			k = (k + 1) % loop.size()
+		if worst >= 0:
+			keep[loop[worst]] = true
+			more = true
+	return more
+
+func _fits(tris: PackedInt32Array, dropped: Array) -> bool:
+	# every dropped corner within CLEAN_HEIGHT of the new triangles
+	for v in dropped:
+		var p := verts[v]
+		var best := INF
+		for k in tris.size() / 3:
+			best = minf(best, _tri_dist(p, verts[tris[k * 3]], verts[tris[k * 3 + 1]], verts[tris[k * 3 + 2]]))
+			if best <= CLEAN_HEIGHT:
+				break
+		if best > CLEAN_HEIGHT:
+			return false
+	return true
+
+static func _tri_dist(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> float:
+	var n := (b - a).cross(c - a)
+	if n.length() > 1e-9:
+		n = n.normalized()
+		var h := (p - a).dot(n)
+		var f := p - n * h   # p on the triangle's plane
+		if (b - a).cross(f - a).dot(n) >= 0.0 and (c - b).cross(f - b).dot(n) >= 0.0 and (a - c).cross(f - c).dot(n) >= 0.0:
+			return absf(h)
+	return minf(p.distance_to(Geometry3D.get_closest_point_to_segment(p, a, b)), minf(
+		p.distance_to(Geometry3D.get_closest_point_to_segment(p, b, c)),
+		p.distance_to(Geometry3D.get_closest_point_to_segment(p, c, a))))
+
+# ---------------------------------------------------------------- quick simplify
+
+var quick := false      # picking corners for a quick simplify
+var _picks: Array = []  # the corners picked so far
+
+func start_quick() -> void:
+	if ngon or previewing:
+		main.set_status("Finish the n-gon / clean up preview first (Enter / Esc)")
+		return
+	quick = true
+	_picks = []
+	sel = {}
+	main.set_status("Quick simplify: click corner 1 of 4 (Esc cancels)")
+	redraw()
+
+func cancel_quick() -> void:
+	if not quick:
+		return
+	quick = false
+	_picks = []
+	main.set_status("Quick simplify cancelled")
+	redraw()
+
+func _pick_quick(at: Vector2) -> void:
+	var v := _vertex_at(at)
+	if v < 0:
+		return
+	if _picks.has(v):
+		_picks.erase(v)   # clicked again: unpicked
+	else:
+		_picks.append(v)
+	if _picks.size() >= 4:
+		_apply_quick()
+		return
+	main.set_status("Quick simplify: click corner %d of 4 (click one again to unpick; Enter with 3: a triangle; Esc cancels)" % (_picks.size() + 1))
+	redraw()
+
+func _sorted_picks() -> Array:
+	# the corners in order round their middle (seen from above), so the click order doesn't matter
+	var c := Vector2.ZERO
+	for v in _picks:
+		c += Vector2(verts[v].x, verts[v].z)
+	c /= maxf(1.0, _picks.size())
+	var out := _picks.duplicate()
+	out.sort_custom(func(a, b): return (Vector2(verts[a].x, verts[a].z) - c).angle() < (Vector2(verts[b].x, verts[b].z) - c).angle())
+	return out
+
+func _apply_quick() -> void:
+	# the triangles inside the corners (seen from above) that join up with them become one piece: its outline is the
+	# picked corners plus the corners triangles outside it still use (so nothing comes apart); holes stay
+	var pts := _sorted_picks()
+	quick = false
+	_picks = []
+	var poly := PackedVector2Array()
+	for v in pts:
+		poly.append(Vector2(verts[v].x, verts[v].z))
+	var nt := faces.size() / 3
+	var inside := func(t: int) -> bool:
+		var c := (verts[faces[t * 3]] + verts[faces[t * 3 + 1]] + verts[faces[t * 3 + 2]]) / 3.0
+		return Geometry2D.is_point_in_polygon(Vector2(c.x, c.z), poly)
+	var edge_tri := {}
+	for t in nt:
+		for e in 3:
+			edge_tri[Vector2i(faces[t * 3 + e], faces[t * 3 + (e + 1) % 3])] = t
+	# from the triangles at the corners, through edges, to triangles inside (not other floors above / below)
+	var region := {}
+	var list: Array = []
+	for t in nt:
+		for e in 3:
+			if pts.has(faces[t * 3 + e]) and not region.has(t) and inside.call(t):
+				region[t] = true
+				list.append(t)
+	var i := 0
+	while i < list.size():
+		var u: int = list[i]
+		i += 1
+		for e in 3:
+			var w: int = edge_tri.get(Vector2i(faces[u * 3 + (e + 1) % 3], faces[u * 3 + e]), -1)
+			if w >= 0 and not region.has(w) and inside.call(w):
+				region[w] = true
+				list.append(w)
+	if region.is_empty():
+		main.set_status("Quick simplify: no triangles inside those corners")
+		redraw()
+		return
+	var r: Variant = _outline(region.keys())
+	if not r is Array:
+		main.set_status("Quick simplify: " + (r if r is String else "no outline") + " - try corners a bit further in or out")
+		redraw()
+		return
+	var used := {}   # corners triangles outside the piece use
+	for t in nt:
+		if not region.has(t):
+			for e in 3:
+				used[faces[t * 3 + e]] = true
+	var outer: Array = r[0][0]
+	for v in pts:
+		if not outer.has(v):
+			main.set_status("Quick simplify: a picked corner isn't on the piece's edge (the triangles inside the corners don't reach it)")
+			redraw()
+			return
+	var lps: Array = [outer.filter(func(v): return pts.has(v) or used.has(v))]
+	lps.append_array(r[0].slice(1))
+	var tris := _triangulate(lps, r[1])
+	if tris.is_empty():
+		main.set_status("Quick simplify: the outline would cross itself - try other corners")
+		redraw()
+		return
+	_snapshot()
+	var out := PackedInt32Array()
+	for t in nt:
+		if not region.has(t):
+			out.append_array(faces.slice(t * 3, t * 3 + 3))
+	out.append_array(tris)
+	faces = out
+	_clean()
+	save()
+	redraw()
+	main.set_status("Quick simplify: %d triangles -> %d (Ctrl+Z undoes it; rebuild the navmesh to use it)" % [region.size(), tris.size() / 3])
